@@ -2,7 +2,14 @@ fastapi==0.115.0
 uvicorn[standard]==0.32.1
 python-multipart==0.0.20
 pypdf==5.1.0
-httpx>=0.25.0
 python-dotenv==1.0.1
 pydantic==2.10.5
 pydantic-core==2.27.2
+
+# Supabase Database & Authentication
+supabase==2.3.4
+python-jose[cryptography]==3.3.0
+
+# Optional: For Redis (in-memory session management - future)
+# redis==5.0.1
+# aioredis==2.0.1

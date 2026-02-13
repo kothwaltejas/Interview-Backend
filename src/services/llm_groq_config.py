@@ -7,8 +7,16 @@ logger = logging.getLogger(__name__)
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-def chat_completion(prompt: str, system_prompt: str = None, max_tokens: int = 4096) -> Optional[str]:
-    """Send a chat completion request to GROQ API directly via HTTP."""
+def chat_completion(prompt: str, system_prompt: str = None, max_tokens: int = 4096, temperature: float = 0.1) -> Optional[str]:
+    """Send a chat completion request to GROQ API directly via HTTP.
+    
+    Args:
+        prompt: The user prompt
+        system_prompt: Optional system prompt for context
+        max_tokens: Maximum tokens in response
+        temperature: Controls randomness (0.0-2.0). Lower = more deterministic, Higher = more creative
+                     Recommended: 0.1 for evaluation, 0.3-0.5 for conversational
+    """
     api_key = os.getenv('GROQ_API_KEY')
     if not api_key:
         logger.error("GROQ_API_KEY not found in environment variables")
@@ -28,7 +36,7 @@ def chat_completion(prompt: str, system_prompt: str = None, max_tokens: int = 40
         payload = {
             "model": "llama-3.3-70b-versatile",
             "messages": messages,
-            "temperature": 0.1,
+            "temperature": temperature,
             "max_tokens": max_tokens
         }
         
