@@ -636,13 +636,21 @@ async def get_session_summary_endpoint(
                 user_id = user["user_id"]
                 logger.info(f"💾 Starting session save for user: {user_id}")
                 
+                # DEBUG: Log session job_context
+                logger.info(f"🔍 DEBUG: session.job_context = {session.job_context}")
+                
                 # Calculate answered and skipped questions
-                answered_count = len([r for r in session.responses if r.get("answer") and not r.get("skipped")])
+                answered_count = len([r for r in session.responses if r.get("answer_text") and not r.get("skipped")])
                 skipped_count = len([r for r in session.responses if r.get("skipped")])
+                
+                # DEBUG: Log responses for answer inspection
+                logger.info(f"🔍 DEBUG: session.responses count = {len(session.responses)}")
+                for idx, resp in enumerate(session.responses):
+                    logger.info(f"🔍 DEBUG: Response {idx+1}: answer_text={repr(resp.get('answer_text', 'MISSING'))[:50]}, skipped={resp.get('skipped')}")
                 
                 # Prepare session data with correct field names
                 session_data = {
-                    "target_role": session.job_context.get("role", "Unknown"),
+                    "target_role": session.job_context.get("target_role", "Unknown"),
                     "experience_level": session.job_context.get("experience_level", "Unknown"),
                     "interview_type": session.job_context.get("interview_type", "technical"),
                     "mode": "conversational",
@@ -655,6 +663,9 @@ async def get_session_summary_endpoint(
                     "overall_feedback": overall_eval.get("summary", ""),
                     "topics_covered": list(set([q.get("category", "General") for q in session.questions if q.get("category")]))
                 }
+                
+                # DEBUG: Log session_data being sent to database
+                logger.info(f"🔍 DEBUG: session_data = {session_data}")
                 
                 # Find resume_id if available (from session metadata)
                 resume_id = session.metadata.get("resume_id") if hasattr(session, 'metadata') else None
@@ -680,9 +691,9 @@ async def get_session_summary_endpoint(
                         "question_text": question.get("question", ""),
                         "category": question.get("category", "General"),
                         "difficulty": question.get("difficulty", "medium"),
-                        "answer_text": response.get("answer", ""),
+                        "answer_text": response.get("answer_text", ""),
                         "is_skipped": response.get("skipped", False),
-                        "duration_seconds": response.get("duration_seconds"),
+                        "duration_seconds": response.get("time_taken_seconds"),
                         "score": response.get("evaluation", {}).get("score") if response.get("evaluation") else None,
                         "evaluation_summary": response.get("evaluation", {}).get("summary") if response.get("evaluation") else None
                     })

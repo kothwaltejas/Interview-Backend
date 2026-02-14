@@ -289,6 +289,74 @@ def _convert_with_pydub(audio_bytes: bytes, original_format: str, input_tmp_path
                 pass
 
 
+def _filter_hallucinations(transcript: str) -> str:
+    """
+    Detect and filter Whisper hallucinations.
+    
+    Common hallucination patterns:
+    - Repeated phrases: "I'm sorry, I'm sorry, I'm sorry..."
+    - Thank you repeated: "Thank you for watching, thank you..."
+    - Subscribe/like patterns from YouTube
+    - Very short repeated words
+    
+    Returns filtered transcript or empty string if hallucination detected.
+    """
+    import re
+    
+    if not transcript:
+        return ""
+    
+    transcript = transcript.strip()
+    
+    # Pattern 1: Same short phrase repeated 3+ times
+    # Split into words and look for repeating patterns
+    words = transcript.split()
+    
+    # If less than 3 words, probably not a hallucination
+    if len(words) < 6:
+        return transcript
+    
+    # Check for repeated bigrams/trigrams (common hallucination pattern)
+    # "I'm sorry" repeated = ["I'm", "sorry", "I'm", "sorry", ...]
+    bigrams = [' '.join(words[i:i+2]) for i in range(len(words)-1)]
+    trigrams = [' '.join(words[i:i+3]) for i in range(len(words)-2)]
+    
+    # Count occurrences
+    for gram_list, threshold in [(bigrams, 5), (trigrams, 4)]:
+        if gram_list:
+            most_common_gram = max(set(gram_list), key=gram_list.count)
+            count = gram_list.count(most_common_gram)
+            ratio = count / len(gram_list)
+            
+            # If any gram repeats more than threshold times with high ratio, it's hallucination
+            if count >= threshold and ratio > 0.4:
+                logger.warning(f"🚫 Detected hallucination pattern: '{most_common_gram}' repeated {count}x ({ratio:.0%})")
+                return ""
+    
+    # Pattern 2: Known hallucination phrases that shouldn't appear in interviews
+    hallucination_phrases = [
+        r"thank you for watching",
+        r"subscribe.*channel",
+        r"like.*video",
+        r"comment below",
+        r"don't forget to",
+        r"see you next time",
+        r"(i'm sorry[,.\s]*){3,}",  # "I'm sorry" 3+ times
+        r"(thank you[,.\s]*){3,}",  # "Thank you" 3+ times
+        r"(yes[,.\s]*){5,}",        # "yes" 5+ times
+        r"(no[,.\s]*){5,}",         # "no" 5+ times
+        r"(um[,.\s]*){5,}",         # "um" 5+ times
+        r"(uh[,.\s]*){5,}",         # "uh" 5+ times
+    ]
+    
+    for pattern in hallucination_phrases:
+        if re.search(pattern, transcript.lower()):
+            logger.warning(f"🚫 Detected hallucination phrase matching: {pattern}")
+            return ""
+    
+    return transcript
+
+
 def transcribe_audio(
     audio_bytes: bytes,
     audio_format: str = "webm",
@@ -357,23 +425,12 @@ def transcribe_audio(
                 total_confidence += segment.avg_logprob
                 segment_count += 1
             
-            # If VAD filtered everything, retry WITHOUT VAD
+            # If VAD filtered everything, this means NO SPEECH was detected
+            # Return empty string immediately - DO NOT retry without VAD
+            # Retrying without VAD causes hallucinations on silence/background noise
             if segment_count == 0:
-                logger.info("⚠️ VAD filtered all audio, retrying without VAD...")
-                segments, info = model.transcribe(
-                    tmp_path,
-                    language=language,
-                    beam_size=5,
-                    best_of=5,
-                    temperature=0.0,
-                    condition_on_previous_text=False,
-                    vad_filter=False  # Disable VAD for retry
-                )
-                
-                for segment in segments:
-                    full_text += segment.text + " "
-                    total_confidence += segment.avg_logprob
-                    segment_count += 1
+                logger.info("⚠️ VAD filtered all audio - no speech detected, returning empty")
+                return "", 0.0
             
             # Calculate average confidence (logprob -> rough percentage)
             avg_confidence = 0.0
@@ -383,7 +440,12 @@ def transcribe_audio(
             
             transcript = full_text.strip()
             
+            # Detect and filter Whisper hallucinations
+            # Common patterns: repeated phrases, "I'm sorry", "Thank you", etc.
+            transcript = _filter_hallucinations(transcript)
+            
             logger.info(f"✅ Transcribed {len(transcript)} characters with confidence {avg_confidence:.2f}")
+            return transcript, avg_confidence
             return transcript, avg_confidence
             
         finally:

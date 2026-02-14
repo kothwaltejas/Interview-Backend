@@ -239,6 +239,9 @@ async def insert_completed_session(
             "topics_covered": session_data.get("topics_covered", [])
         }
         
+        # DEBUG: Log the data being inserted
+        logger.info(f"🔍 DEBUG: Session insert data - target_role='{data['target_role']}', experience_level='{data['experience_level']}'")
+        
         result = await _db_insert("interview_sessions", data)
         logger.info(f"Session inserted for user {user_id}")
         return result
@@ -308,6 +311,8 @@ async def insert_answers_bulk(
                 "score": answer.get("score"),
                 "evaluation_summary": answer.get("evaluation_summary")
             }
+            # DEBUG: Log each answer record
+            logger.info(f"🔍 DEBUG: Answer record {record['question_number']}: answer_text='{record['answer_text'][:50] if record['answer_text'] else 'EMPTY'}...', is_skipped={record['is_skipped']}")
             answer_records.append(record)
         
         # Bulk insert using REST API
