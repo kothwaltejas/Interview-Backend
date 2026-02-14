@@ -857,6 +857,118 @@ async def evaluate_answer_endpoint(request: EvaluateAnswerRequest):
             detail=f"Failed to generate questions: {str(e)}"
         )
 
+
+# =====================================================
+# SPEECH-TO-TEXT ENDPOINT (Voice Interview Interface)
+# =====================================================
+# This is an INTERFACE LAYER only - does NOT modify interview logic
+# The STT service is modular and can be swapped with any provider
+
+# Lazy import to avoid breaking existing functionality if STT not installed
+STT_AVAILABLE = False
+try:
+    from services.speech_to_text import transcribe_audio, is_stt_available
+    STT_AVAILABLE = is_stt_available()
+    if STT_AVAILABLE:
+        logger.info("✅ Speech-to-Text service available")
+    else:
+        logger.warning("⚠️ Speech-to-Text dependencies not installed")
+except ImportError as e:
+    logger.warning(f"⚠️ Speech-to-Text service not available: {e}")
+
+
+@app.get("/api/audio/stt/status")
+async def stt_status_endpoint():
+    """
+    Check if STT service is available.
+    Frontend uses this to decide whether to show voice mode option.
+    """
+    return JSONResponse(content={
+        "available": STT_AVAILABLE,
+        "message": "STT service is ready" if STT_AVAILABLE else "STT requires faster-whisper installation"
+    })
+
+
+@app.post("/api/audio/stt")
+async def speech_to_text_endpoint(
+    audio: UploadFile = File(...),
+    language: str = "en"
+):
+    """
+    Convert speech audio to text using local Whisper model.
+    
+    This endpoint is designed to be:
+    - MODULAR: Can be swapped with any STT provider
+    - SIMPLE: Just audio in, text out
+    - DECOUPLED: Does NOT touch interview/session logic
+    
+    The frontend sends audio, gets text, then uses existing
+    text-based endpoints for interview logic.
+    
+    Args:
+        audio: Audio file (webm, wav, mp3 supported)
+        language: Language code (default: en)
+    
+    Returns:
+        JSON with transcript and confidence score
+    
+    Flow:
+        Frontend MediaRecorder -> This endpoint -> Clean text
+        Clean text -> Existing /api/session/conversational-answer
+    """
+    if not STT_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Speech-to-Text service not available. Install faster-whisper: pip install faster-whisper"
+        )
+    
+    try:
+        # Read audio file
+        audio_bytes = await audio.read()
+        
+        if not audio_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail="Empty audio file received"
+            )
+        
+        # Determine audio format from filename
+        filename = audio.filename or "audio.webm"
+        audio_format = filename.split(".")[-1].lower()
+        
+        # Supported formats
+        supported_formats = ["webm", "wav", "mp3", "m4a", "ogg", "flac"]
+        if audio_format not in supported_formats:
+            audio_format = "webm"  # Default assumption for browser MediaRecorder
+        
+        logger.info(f"🎤 Received audio: {len(audio_bytes)} bytes, format: {audio_format}")
+        
+        # Transcribe using Whisper
+        transcript, confidence = transcribe_audio(
+            audio_bytes=audio_bytes,
+            audio_format=audio_format,
+            language=language
+        )
+        
+        # Return clean response
+        return JSONResponse(content={
+            "success": True,
+            "transcript": transcript,
+            "confidence": round(confidence, 2),
+            "language": language,
+            "audio_size_bytes": len(audio_bytes)
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ STT failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Speech-to-Text processing failed: {str(e)}"
+        )
+
+
 if __name__ == "__main__":
     host = os.getenv('HOST', '0.0.0.0')
     port = int(os.getenv('PORT', 8000))

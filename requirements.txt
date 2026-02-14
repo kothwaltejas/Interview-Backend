@@ -7,8 +7,14 @@ pydantic==2.10.5
 pydantic-core==2.27.2
 
 # Supabase Database & Authentication
-supabase==2.3.4
+supabase>=2.10.0
 python-jose[cryptography]==3.3.0
+groq==0.11.0
+
+# Speech-to-Text (Local Whisper - FREE, no API key needed)
+# Note: faster-whisper requires ~500MB download on first run for the model
+faster-whisper>=1.2.1
+pydub>=0.25.1
 
 # Optional: For Redis (in-memory session management - future)
 # redis==5.0.1
