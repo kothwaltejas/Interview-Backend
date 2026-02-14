@@ -20,11 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Lazy load faster-whisper to avoid import errors if not installed
 _whisper_model = None
-
-# Model configuration - can be overridden via environment variables
-# Options: tiny, base, small, medium, large-v2
-# "small" provides better accuracy for interview speech recognition
-_model_size = os.getenv("WHISPER_MODEL_SIZE", "small")
+_model_size = "base"  # Options: tiny, base, small, medium, large-v2
 
 
 def get_whisper_model():
@@ -34,12 +30,10 @@ def get_whisper_model():
     
     Model sizes (pick based on your hardware):
     - tiny: ~39MB, fastest, lowest accuracy
-    - base: ~74MB, good balance
-    - small: ~244MB, better accuracy (RECOMMENDED for interviews)
+    - base: ~74MB, good balance (RECOMMENDED for CPU)
+    - small: ~244MB, better accuracy, slower
     - medium: ~769MB, high accuracy, requires decent RAM
     - large-v2: ~1.5GB, best accuracy, slow on CPU
-    
-    Set WHISPER_MODEL_SIZE env var to change model.
     """
     global _whisper_model
     
@@ -49,22 +43,17 @@ def get_whisper_model():
             
             logger.info(f"🎤 Loading Whisper model: {_model_size}")
             
-            # Detect number of CPU cores for optimal threading
-            import multiprocessing
-            cpu_count = multiprocessing.cpu_count()
-            optimal_threads = min(cpu_count, 8)  # Cap at 8 threads
-            
             # Use CPU with int8 quantization for faster inference
             # compute_type options: int8 (fastest), float16 (GPU), float32 (best quality)
             _whisper_model = WhisperModel(
                 _model_size,
                 device="cpu",  # Use "cuda" if you have GPU
                 compute_type="int8",  # Fastest for CPU
-                cpu_threads=optimal_threads,  # Dynamic based on CPU
-                num_workers=2  # Parallel processing for batches
+                cpu_threads=4,  # Adjust based on your CPU
+                num_workers=1  # Single worker for consistent results
             )
             
-            logger.info(f"✅ Whisper model '{_model_size}' loaded successfully with {optimal_threads} threads")
+            logger.info(f"✅ Whisper model loaded successfully")
             
         except ImportError:
             logger.error("❌ faster-whisper not installed. Run: pip install faster-whisper")
@@ -341,27 +330,20 @@ def transcribe_audio(
             tmp_path = tmp_file.name
         
         try:
-            # Transcribe with optimized parameters for interview speech
-            # Higher beam_size and word_timestamps improve accuracy for natural speech
+            # First try with VAD filter (removes silence for better accuracy)
             segments, info = model.transcribe(
                 tmp_path,
                 language=language,
-                beam_size=8,  # Increased from 5 - better accuracy for complex speech
+                beam_size=5,  # Balance between speed and accuracy
                 best_of=5,  # Number of candidates to consider
-                patience=1.5,  # Beam search patience factor - allows longer exploration
                 temperature=0.0,  # Deterministic output (no randomness)
-                condition_on_previous_text=True,  # Better context handling for natural speech
-                word_timestamps=True,  # Enable word-level timestamps for better accuracy
+                condition_on_previous_text=False,  # Each segment independent
                 vad_filter=True,  # Voice Activity Detection - removes silence
                 vad_parameters={
-                    "min_silence_duration_ms": 250,  # Reduced - more sensitive to speech gaps
-                    "speech_pad_ms": 500,  # Increased padding around speech segments
-                    "threshold": 0.25,  # Lower threshold - more lenient speech detection
-                    "min_speech_duration_ms": 150  # Minimum speech duration to consider
-                },
-                # Suppress common misrecognitions and hallucinations
-                suppress_blank=True,
-                initial_prompt="This is an interview response. The speaker is answering professional questions clearly."
+                    "min_silence_duration_ms": 300,  # Reduced from 500 - more sensitive
+                    "speech_pad_ms": 400,  # Increased padding around speech
+                    "threshold": 0.3  # Lower threshold - more lenient VAD
+                }
             )
             
             # Collect all segments into full transcript
@@ -375,21 +357,17 @@ def transcribe_audio(
                 total_confidence += segment.avg_logprob
                 segment_count += 1
             
-            # If VAD filtered everything, retry WITHOUT VAD (more aggressive)
+            # If VAD filtered everything, retry WITHOUT VAD
             if segment_count == 0:
                 logger.info("⚠️ VAD filtered all audio, retrying without VAD...")
                 segments, info = model.transcribe(
                     tmp_path,
                     language=language,
-                    beam_size=8,
+                    beam_size=5,
                     best_of=5,
-                    patience=1.5,
                     temperature=0.0,
-                    condition_on_previous_text=True,
-                    word_timestamps=True,
-                    vad_filter=False,  # Disable VAD for retry
-                    suppress_blank=True,
-                    initial_prompt="This is an interview response."
+                    condition_on_previous_text=False,
+                    vad_filter=False  # Disable VAD for retry
                 )
                 
                 for segment in segments:
