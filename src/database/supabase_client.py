@@ -123,11 +123,14 @@ async def _db_select(
 async def _db_upsert(table: str, data: Dict[str, Any], conflict_column: str = "id") -> Dict[str, Any]:
     """Upsert (insert or update) a record"""
     headers = SupabaseDB.get_headers()
-    headers["Prefer"] = f"resolution=merge-duplicates,return=representation"
+    # Use resolution=merge-duplicates for upsert behavior
+    headers["Prefer"] = "resolution=merge-duplicates,return=representation"
     
     async with httpx.AsyncClient() as client:
+        # Add on_conflict parameter to URL for proper upsert
+        url = f"{SupabaseDB.get_rest_url()}/{table}?on_conflict={conflict_column}"
         response = await client.post(
-            f"{SupabaseDB.get_rest_url()}/{table}",
+            url,
             headers=headers,
             json=data
         )
