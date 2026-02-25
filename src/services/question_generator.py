@@ -17,6 +17,306 @@ from typing import Dict, Any, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _get_question_structure_for_interview_type(
+    interview_type: str,
+    target_role: str,
+    difficulty: Dict[str, str],
+    num_questions: int
+) -> str:
+    """
+    Generate the question structure prompt based on interview type.
+    
+    Interview Types:
+    - Technical: All technical questions (8 tech + 3 behavioral)
+    - HR/Behavioral: All HR, behavioral, and scenario-based questions
+    - Mixed: 6-7 technical + 4-5 HR/behavioral questions
+    """
+    interview_type_lower = interview_type.lower()
+    
+    # ═══════════════════════════════════════════════════════════════
+    # TECHNICAL INTERVIEW - Focus on technical skills
+    # ═══════════════════════════════════════════════════════════════
+    if interview_type_lower == 'technical':
+        return f"""════════════════════════════════════════════════════════════════════════════════
+STRICT QUESTION STRUCTURE - TECHNICAL INTERVIEW
+════════════════════════════════════════════════════════════════════════════════
+
+Generate {num_questions} questions following this EXACT structure:
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 1: INTRODUCTION (Question 1)                                        ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ - Warm, welcoming introduction                                              ║
+║ - Ask candidate to introduce themselves                                     ║
+║ - Ask about their background and journey                                    ║
+║ - Category: "introduction"                                                  ║
+║ - Difficulty: "{difficulty['base']}"                                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 2: RESUME-BASED TECHNICAL (Questions 2-5)                           ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Q2: Ask about their MOST impressive project from resume                     ║
+║     - Mention project by NAME from their resume                             ║
+║     - Ask about architecture, tech stack, their role                        ║
+║     - Category: "resume_based"                                              ║
+║     - Difficulty: "{difficulty['base']}"                                    ║
+║                                                                              ║
+║ Q3: FOLLOW-UP on Q2                                                         ║
+║     - Dig deeper into challenges faced                                      ║
+║     - Ask about specific implementation decisions                           ║
+║     - Category: "follow_up"                                                 ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║     - Mark: "follow_up": true                                               ║
+║                                                                              ║
+║ Q4: Ask about ANOTHER project or specific SKILL from resume                 ║
+║     - Reference actual skills/technologies from their CV                    ║
+║     - Category: "resume_based"                                              ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║                                                                              ║
+║ Q5: FOLLOW-UP probing question                                              ║
+║     - Scalability, optimization, testing approaches                         ║
+║     - Category: "follow_up"                                                 ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║     - Mark: "follow_up": true                                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 3: ROLE-SPECIFIC TECHNICAL (Questions 6-9)                          ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Q6: Core technical concept for {target_role}                                ║
+║     - Fundamental domain knowledge                                          ║
+║     - Category: "role_based"                                                ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║                                                                              ║
+║ Q7: System design / Architecture question                                   ║
+║     - Real-world scenario relevant to {target_role}                         ║
+║     - Category: "role_based"                                                ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║                                                                              ║
+║ Q8: Problem-solving / Debugging scenario                                    ║
+║     - "How would you approach..." type question                             ║
+║     - Category: "role_based"                                                ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║                                                                              ║
+║ Q9: Advanced technical / Best practices                                     ║
+║     - Security, performance, code quality                                   ║
+║     - Category: "role_based"                                                ║
+║     - Difficulty: "hard"                                                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 4: BEHAVIORAL (Questions 10-12)                                      ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Q10: Teamwork / Collaboration                                               ║
+║      - "Tell me about a time when..." format                                ║
+║      - Category: "behavioral"                                               ║
+║      - Difficulty: "{difficulty['behavioral']}"                             ║
+║                                                                              ║
+║ Q11: Conflict / Pressure handling                                           ║
+║      - Deadline pressure, disagreements, challenges                         ║
+║      - Category: "behavioral"                                               ║
+║      - Difficulty: "{difficulty['behavioral']}"                             ║
+║                                                                              ║
+║ Q12: Career goals / Closing question                                        ║
+║      - "Why this role? Where do you see yourself?"                          ║
+║      - Category: "behavioral"                                               ║
+║      - Difficulty: "{difficulty['behavioral']}"                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝"""
+
+    # ═══════════════════════════════════════════════════════════════
+    # HR/BEHAVIORAL INTERVIEW - Focus on soft skills & scenarios
+    # ═══════════════════════════════════════════════════════════════
+    elif interview_type_lower in ['hr', 'behavioral', 'hr/behavioral']:
+        return f"""════════════════════════════════════════════════════════════════════════════════
+STRICT QUESTION STRUCTURE - HR/BEHAVIORAL INTERVIEW
+════════════════════════════════════════════════════════════════════════════════
+
+Generate {num_questions} questions - ALL must be HR, behavioral, or scenario-based.
+NO technical coding questions. Focus on soft skills, personality, and work situations.
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 1: INTRODUCTION (Question 1)                                        ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ - Warm, welcoming introduction                                              ║
+║ - Ask candidate to introduce themselves                                     ║
+║ - Ask about their background, interests, and career journey                 ║
+║ - Category: "introduction"                                                  ║
+║ - Difficulty: "{difficulty['base']}"                                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 2: BACKGROUND & MOTIVATION (Questions 2-4)                          ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Q2: Career motivation question                                              ║
+║     - "What motivated you to pursue {target_role}?"                         ║
+║     - "Why did you choose this career path?"                                ║
+║     - Category: "hr"                                                        ║
+║     - Difficulty: "{difficulty['base']}"                                    ║
+║                                                                              ║
+║ Q3: Strengths and self-awareness                                            ║
+║     - "What are your greatest strengths?"                                   ║
+║     - "How do you leverage your strengths in your work?"                    ║
+║     - Category: "hr"                                                        ║
+║     - Difficulty: "{difficulty['behavioral']}"                              ║
+║                                                                              ║
+║ Q4: Weaknesses and growth mindset                                           ║
+║     - "What areas are you working to improve?"                              ║
+║     - "How do you handle constructive criticism?"                           ║
+║     - Category: "hr"                                                        ║
+║     - Difficulty: "{difficulty['behavioral']}"                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 3: SITUATIONAL/SCENARIO-BASED (Questions 5-8)                       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Q5: Teamwork scenario                                                       ║
+║     - "Tell me about a time you worked in a challenging team"               ║
+║     - "Describe a successful collaboration experience"                      ║
+║     - Category: "behavioral"                                                ║
+║     - Difficulty: "{difficulty['behavioral']}"                              ║
+║     - Use STAR format expectation                                           ║
+║                                                                              ║
+║ Q6: Conflict resolution scenario                                            ║
+║     - "Tell me about a time you had a disagreement with a colleague"        ║
+║     - "How did you handle a difficult conversation?"                        ║
+║     - Category: "behavioral"                                                ║
+║     - Difficulty: "{difficulty['behavioral']}"                              ║
+║                                                                              ║
+║ Q7: Pressure/deadline scenario                                              ║
+║     - "Describe a time when you had to meet a tight deadline"               ║
+║     - "How do you handle high-pressure situations?"                         ║
+║     - Category: "scenario"                                                  ║
+║     - Difficulty: "{difficulty['behavioral']}"                              ║
+║                                                                              ║
+║ Q8: Failure/learning scenario                                               ║
+║     - "Tell me about a time you failed and what you learned"                ║
+║     - "Describe a mistake you made and how you handled it"                  ║
+║     - Category: "scenario"                                                  ║
+║     - Difficulty: "{difficulty['behavioral']}"                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 4: LEADERSHIP & CULTURE FIT (Questions 9-12)                        ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Q9: Leadership/Initiative                                                   ║
+║     - "Tell me about a time you took initiative"                            ║
+║     - "Describe when you led a project or mentored someone"                 ║
+║     - Category: "behavioral"                                                ║
+║     - Difficulty: "{difficulty['behavioral']}"                              ║
+║                                                                              ║
+║ Q10: Work style and preferences                                             ║
+║      - "What kind of work environment helps you thrive?"                    ║
+║      - "How do you prefer to communicate with your team?"                   ║
+║      - Category: "hr"                                                       ║
+║      - Difficulty: "{difficulty['behavioral']}"                             ║
+║                                                                              ║
+║ Q11: Ethical dilemma or value-based question                                ║
+║      - "What would you do if you disagreed with your manager's decision?"   ║
+║      - "How do you handle situations where you see something wrong?"        ║
+║      - Category: "scenario"                                                 ║
+║      - Difficulty: "{difficulty['behavioral']}"                             ║
+║                                                                              ║
+║ Q12: Future goals and company fit                                           ║
+║      - "Where do you see yourself in 5 years?"                              ║
+║      - "What are you looking for in your next role?"                        ║
+║      - Category: "hr"                                                       ║
+║      - Difficulty: "{difficulty['behavioral']}"                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝"""
+
+    # ═══════════════════════════════════════════════════════════════
+    # MIXED INTERVIEW - Technical first (7), then HR (4) at the end
+    # ═══════════════════════════════════════════════════════════════
+    else:  # Mixed or default
+        return f"""════════════════════════════════════════════════════════════════════════════════
+STRICT QUESTION STRUCTURE - MIXED INTERVIEW (Technical + HR)
+════════════════════════════════════════════════════════════════════════════════
+
+Generate {num_questions} questions: FIRST 8 questions (intro + 7 technical), THEN 4 HR questions at the END.
+IMPORTANT: ALL technical questions MUST come BEFORE any HR questions.
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 1: INTRODUCTION (Question 1)                                        ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ - Warm, welcoming introduction                                              ║
+║ - Ask candidate to introduce themselves                                     ║
+║ - Ask about their background and journey                                    ║
+║ - Category: "introduction"                                                  ║
+║ - Difficulty: "{difficulty['base']}"                                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 2: RESUME-BASED TECHNICAL (Questions 2-5) - 4 TECHNICAL            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Q2: Ask about their MOST impressive project from resume                     ║
+║     - Mention project by NAME from their resume                             ║
+║     - Ask about architecture, tech stack, their role                        ║
+║     - Category: "resume_based"                                              ║
+║     - Difficulty: "{difficulty['base']}"                                    ║
+║                                                                              ║
+║ Q3: FOLLOW-UP on the project                                                ║
+║     - Dig deeper into challenges faced                                      ║
+║     - Ask about specific implementation decisions                           ║
+║     - Category: "follow_up"                                                 ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║     - Mark: "follow_up": true                                               ║
+║                                                                              ║
+║ Q4: Ask about ANOTHER project or specific SKILL from resume                 ║
+║     - Reference actual skills/technologies from their CV                    ║
+║     - Category: "resume_based"                                              ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║                                                                              ║
+║ Q5: FOLLOW-UP probing question                                              ║
+║     - Scalability, optimization, or testing approaches                      ║
+║     - Category: "follow_up"                                                 ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║     - Mark: "follow_up": true                                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 3: ROLE-SPECIFIC TECHNICAL (Questions 6-8) - 3 TECHNICAL           ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Q6: Core technical concept for {target_role}                                ║
+║     - Fundamental domain knowledge                                          ║
+║     - Category: "role_based"                                                ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║                                                                              ║
+║ Q7: System design / Problem-solving scenario                                ║
+║     - Real-world technical scenario                                         ║
+║     - Category: "role_based"                                                ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+║                                                                              ║
+║ Q8: Technical best practices / Advanced topic                               ║
+║     - Testing, code quality, security, or architecture                      ║
+║     - Category: "role_based"                                                ║
+║     - Difficulty: "{difficulty['tech']}"                                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 4: HR/BEHAVIORAL (Questions 9-12) - 4 HR QUESTIONS AT THE END      ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Q9: Teamwork / Collaboration scenario                                       ║
+║     - "Tell me about a time you worked in a challenging team"               ║
+║     - Category: "behavioral"                                                ║
+║     - Difficulty: "{difficulty['behavioral']}"                              ║
+║                                                                              ║
+║ Q10: Conflict or pressure handling                                          ║
+║      - "Describe a time you faced a difficult situation at work"            ║
+║      - Category: "behavioral"                                               ║
+║      - Difficulty: "{difficulty['behavioral']}"                             ║
+║                                                                              ║
+║ Q11: Leadership / Initiative                                                ║
+║      - "Tell me about a time you took ownership or led something"           ║
+║      - Category: "behavioral"                                               ║
+║      - Difficulty: "{difficulty['behavioral']}"                             ║
+║                                                                              ║
+║ Q12: Career goals / Company fit                                             ║
+║      - "Why this role? Where do you see yourself in 5 years?"               ║
+║      - Category: "hr"                                                       ║
+║      - Difficulty: "{difficulty['behavioral']}"                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝"""
+
+
 def generate_interview_questions(
     resume_data: Dict[str, Any], 
     job_context: Dict[str, Any] = None,
@@ -126,9 +426,16 @@ EDUCATION:
         difficulty = difficulty_config.get(experience_level, difficulty_config["1-3 years"])
 
         # ═══════════════════════════════════════════════════════════════
-        # BUILD THE STRUCTURED LLM PROMPT
+        # BUILD THE STRUCTURED LLM PROMPT BASED ON INTERVIEW TYPE
         # ═══════════════════════════════════════════════════════════════
-        prompt = f"""You are an expert technical interviewer conducting a {interview_type} interview for a {target_role} position.
+        question_structure = _get_question_structure_for_interview_type(
+            interview_type=interview_type,
+            target_role=target_role,
+            difficulty=difficulty,
+            num_questions=num_questions
+        )
+        
+        prompt = f"""You are an expert interviewer conducting a {interview_type} interview for a {target_role} position.
 
 {resume_summary}
 
@@ -139,95 +446,7 @@ Experience Level: {experience_level}
 Interview Type: {interview_type}
 Total Questions Required: {num_questions}
 
-════════════════════════════════════════════════════════════════════════════════
-STRICT QUESTION STRUCTURE - FOLLOW EXACTLY
-════════════════════════════════════════════════════════════════════════════════
-
-Generate {num_questions} questions following this EXACT structure:
-
-╔══════════════════════════════════════════════════════════════════════════════╗
-║ SECTION 1: INTRODUCTION (Question 1)                                        ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║ - Warm, welcoming introduction                                              ║
-║ - Ask candidate to introduce themselves                                     ║
-║ - Ask about their background and journey                                    ║
-║ - Category: "introduction"                                                  ║
-║ - Difficulty: "{difficulty['base']}"                                        ║
-║ - DO NOT use exact template - be natural but include same content          ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════════════════════╗
-║ SECTION 2: RESUME-BASED TECHNICAL (Questions 2-5)                           ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║ Q2: Ask about their MOST impressive project from resume                     ║
-║     - Mention project by NAME from their resume                             ║
-║     - Ask about architecture, tech stack, their role                        ║
-║     - Category: "resume_based"                                              ║
-║     - Difficulty: "{difficulty['base']}"                                    ║
-║                                                                              ║
-║ Q3: FOLLOW-UP on Q2                                                         ║
-║     - Dig deeper into challenges faced                                      ║
-║     - Ask about specific implementation decisions                           ║
-║     - Category: "follow_up"                                                 ║
-║     - Difficulty: "{difficulty['tech']}"                                    ║
-║     - Mark: "follow_up": true                                               ║
-║                                                                              ║
-║ Q4: Ask about ANOTHER project or specific SKILL from resume                 ║
-║     - Reference actual skills/technologies from their CV                    ║
-║     - Category: "resume_based"                                              ║
-║     - Difficulty: "{difficulty['tech']}"                                    ║
-║                                                                              ║
-║ Q5: FOLLOW-UP probing question                                              ║
-║     - Could be about scalability, optimization, testing                     ║
-║     - Category: "follow_up"                                                 ║
-║     - Difficulty: "{difficulty['tech']}"                                    ║
-║     - Mark: "follow_up": true                                               ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════════════════════╗
-║ SECTION 3: ROLE-SPECIFIC TECHNICAL (Questions 6-9)                          ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║ Q6: Core technical concept for {target_role}                                ║
-║     - NOT limited to their resume                                           ║
-║     - Test fundamental domain knowledge                                     ║
-║     - Category: "role_based"                                                ║
-║     - Difficulty: "{difficulty['tech']}"                                    ║
-║                                                                              ║
-║ Q7: System design / Architecture question                                   ║
-║     - Real-world scenario relevant to {target_role}                         ║
-║     - Category: "role_based"                                                ║
-║     - Difficulty: "{difficulty['tech']}"                                    ║
-║                                                                              ║
-║ Q8: Problem-solving / Debugging scenario                                    ║
-║     - "How would you approach..." type question                             ║
-║     - Category: "role_based"                                                ║
-║     - Difficulty: "{difficulty['tech']}"                                    ║
-║                                                                              ║
-║ Q9: Advanced technical / Best practices                                     ║
-║     - Security, performance, code quality                                   ║
-║     - Category: "role_based"                                                ║
-║     - Difficulty: "hard"                                                    ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════════════════════╗
-║ SECTION 4: BEHAVIORAL (Questions 10-12)                                      ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║ Q10: Teamwork / Collaboration                                               ║
-║      - "Tell me about a time when..." format                                ║
-║      - Category: "behavioral"                                               ║
-║      - Difficulty: "{difficulty['behavioral']}"                             ║
-║                                                                              ║
-║ Q11: Conflict / Pressure handling                                           ║
-║      - Deadline pressure, disagreements, challenges                         ║
-║      - Category: "behavioral"                                               ║
-║      - Difficulty: "{difficulty['behavioral']}"                             ║
-║                                                                              ║
-║ Q12: Leadership / Initiative OR Closing question                            ║
-║      - Taking ownership, going beyond requirements                          ║
-║      - OR "Why this role? Where do you see yourself?"                       ║
-║      - Category: "behavioral"                                               ║
-║      - Difficulty: "{difficulty['behavioral']}"                             ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+{question_structure}
 
 ════════════════════════════════════════════════════════════════════════════════
 OUTPUT FORMAT - STRICT JSON ARRAY
@@ -247,10 +466,10 @@ Return ONLY a JSON array with NO markdown, NO explanation, NO extra text:
   }},
   {{
     "id": 2,
-    "question": "Specific resume-based question mentioning their project",
-    "category": "resume_based",
+    "question": "Your next question based on the structure above",
+    "category": "appropriate_category",
     "difficulty": "medium",
-    "focus_area": "project_name_from_resume",
+    "focus_area": "relevant_focus",
     "follow_up": false,
     "expected_duration_seconds": 120
   }}
@@ -258,12 +477,12 @@ Return ONLY a JSON array with NO markdown, NO explanation, NO extra text:
 
 QUALITY RULES:
 1. Be CONVERSATIONAL - sound like a real human interviewer
-2. Be SPECIFIC - reference actual projects/skills from their resume by name
+2. Be SPECIFIC - reference actual details from their resume when appropriate
 3. NO repetition - each question must be unique
 4. NO generic questions - personalize everything
 5. PROGRESSIVE difficulty - questions should get slightly harder
 6. Mark follow-up questions with "follow_up": true
-7. For HR/Behavioral interviews: replace some technical questions with behavioral
+7. STRICTLY follow the question structure provided above
 
 Generate exactly {num_questions} questions as a clean JSON array:"""
 
