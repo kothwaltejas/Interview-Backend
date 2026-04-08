@@ -627,6 +627,7 @@ async def get_session_summary_endpoint(
         
         # NEW: Use enhanced summary builder to aggregate evaluations
         # This will check for stored evaluations in responses and build a rich report
+        overall_eval = summary.get("overall_evaluation") or {}
         try:
             logger.info(f"🏗️ Building enhanced session summary with per-answer evaluations")
             enhanced_summary = build_session_summary(
@@ -638,6 +639,12 @@ async def get_session_summary_endpoint(
             
             # Merge enhanced summary into base summary
             summary.update(enhanced_summary)
+            overall_eval = {
+                "overall_score": summary.get("overall_score"),
+                "performance_tier": summary.get("performance_tier"),
+                "summary": summary.get("coaching_summary", "")
+            }
+            summary["overall_evaluation"] = overall_eval
             logger.info(f"✅ Enhanced summary built - Overall Score: {summary.get('overall_score', 'N/A')}")
             
         except Exception as summary_error:
@@ -856,7 +863,7 @@ async def conversational_answer_endpoint(request: ConversationalAnswerRequest):
             logger.info(f"🎯 Evaluating answer for session {request.session_id}")
             evaluation = await evaluate_answer_enhanced(
                 question=current_question_data.get('question', ''),
-                answer_text=request.answer_text,
+                candidate_answer=request.answer_text,
                 target_role=session.job_context.get('target_role', 'Unknown'),
                 experience_level=session.job_context.get('experience_level', 'Unknown'),
                 interview_type=session.job_context.get('interview_type', 'Technical')
