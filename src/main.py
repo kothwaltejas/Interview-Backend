@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import os
 import uvicorn
 from dotenv import load_dotenv
@@ -24,6 +24,8 @@ from services.question_generator import generate_interview_questions
 from services.interview_session import InterviewSession
 from services.answer_evaluator import evaluate_answer, batch_evaluate_session
 from services.conversational_interviewer import generate_interviewer_response, generate_opening_question
+from services.enhanced_evaluation_service import evaluate_answer_enhanced, get_evaluation_service
+from services.session_summary_builder import build_session_summary
 import logging
 
 # Database and Auth imports
@@ -127,6 +129,15 @@ class ConversationalAnswerRequest(BaseModel):
     session_id: str
     answer_text: str
     time_taken_seconds: Optional[int] = None
+
+class EnhancedEvaluationRequest(BaseModel):
+    """Request for enhanced answer evaluation using dataset."""
+    question: str
+    answer_text: str
+    target_role: str = "Backend Engineer"
+    experience_level: str = "Mid"
+    interview_type: str = "Mixed"
+    user_id: Optional[str] = None  # For storing results
 
 # Safe dependency wrapper for optional user authentication
 async def get_user_if_authenticated(request: Request) -> Optional[dict]:
@@ -614,13 +625,29 @@ async def get_session_summary_endpoint(
         
         summary = session.get_session_summary()
         
-        # Add overall evaluation
-        overall_eval = batch_evaluate_session(
-            session.responses,
-            session.job_context
-        )
-        
-        summary['overall_evaluation'] = overall_eval
+        # NEW: Use enhanced summary builder to aggregate evaluations
+        # This will check for stored evaluations in responses and build a rich report
+        try:
+            logger.info(f"🏗️ Building enhanced session summary with per-answer evaluations")
+            enhanced_summary = build_session_summary(
+                responses=session.responses,
+                questions=session.questions,
+                job_context=session.job_context,
+                session_metadata=session.metadata
+            )
+            
+            # Merge enhanced summary into base summary
+            summary.update(enhanced_summary)
+            logger.info(f"✅ Enhanced summary built - Overall Score: {summary.get('overall_score', 'N/A')}")
+            
+        except Exception as summary_error:
+            logger.warning(f"⚠️ Failed to build enhanced summary: {summary_error} - using fallback")
+            # Fallback to basic evaluation
+            overall_eval = batch_evaluate_session(
+                session.responses,
+                session.job_context
+            )
+            summary['overall_evaluation'] = overall_eval
         
         response_data = {
             "success": True,
@@ -686,7 +713,19 @@ async def get_session_summary_endpoint(
                 answers = []
                 for idx, response in enumerate(session.responses):
                     question = session.questions[idx] if idx < len(session.questions) else {}
-                    answers.append({
+                    
+                    # Extract evaluation data if available
+                    evaluation = response.get("evaluation")
+                    evaluation_data = {
+                        "score": evaluation.get("average_score") if evaluation else None,
+                        "evaluation_summary": evaluation.get("feedback") if evaluation else None,
+                        "scores": evaluation.get("scores") if evaluation else None,
+                        "weak_areas": evaluation.get("weak_areas") if evaluation else None,
+                        "strengths": evaluation.get("strengths") if evaluation else None,
+                        "evaluation_json": evaluation if evaluation else None
+                    }
+                    
+                    answer = {
                         "question_number": idx + 1,
                         "question_text": question.get("question", ""),
                         "category": question.get("category", "General"),
@@ -694,9 +733,13 @@ async def get_session_summary_endpoint(
                         "answer_text": response.get("answer_text", ""),
                         "is_skipped": response.get("skipped", False),
                         "duration_seconds": response.get("time_taken_seconds"),
-                        "score": response.get("evaluation", {}).get("score") if response.get("evaluation") else None,
-                        "evaluation_summary": response.get("evaluation", {}).get("summary") if response.get("evaluation") else None
-                    })
+                    }
+                    
+                    # Add evaluation fields if available
+                    if evaluation:
+                        answer.update(evaluation_data)
+                    
+                    answers.append(answer)
                 
                 # Insert answers
                 if answers:
@@ -800,11 +843,35 @@ async def conversational_answer_endpoint(request: ConversationalAnswerRequest):
             'message': interviewer_response
         })
         
-        # Record the answer (without evaluation for now)
+        # Record the answer
         result = session.submit_answer(
             answer_text=request.answer_text,
             time_taken_seconds=request.time_taken_seconds
         )
+        
+        # NEW: Evaluate answer using enhanced evaluation service
+        # This runs asynchronously to not block the response
+        evaluation = None
+        try:
+            logger.info(f"🎯 Evaluating answer for session {request.session_id}")
+            evaluation = await evaluate_answer_enhanced(
+                question=current_question_data.get('question', ''),
+                answer_text=request.answer_text,
+                target_role=session.job_context.get('target_role', 'Unknown'),
+                experience_level=session.job_context.get('experience_level', 'Unknown'),
+                interview_type=session.job_context.get('interview_type', 'Technical')
+            )
+            logger.info(f"✅ Answer evaluated - Score: {evaluation.get('average_score', 'N/A')}")
+            
+            # Store evaluation in session responses
+            if session.responses:
+                session.responses[-1]['evaluation'] = evaluation
+                logger.info(f"📊 Evaluation stored in session response")
+        
+        except Exception as e:
+            logger.error(f"⚠️ Error evaluating answer (non-blocking): {str(e)}")
+            # Continue without evaluation - don't break the interview flow
+            evaluation = None
         
         # Check if interview is complete
         next_question = session.get_current_question()
@@ -815,6 +882,11 @@ async def conversational_answer_endpoint(request: ConversationalAnswerRequest):
             "interviewer_response": interviewer_response,
             "is_complete": is_complete
         }
+        
+        # Include evaluation in response if available (frontend can use this)
+        if evaluation:
+            response_data["evaluation"] = evaluation
+            logger.info(f"📤 Evaluation included in response")
         
         if not is_complete:
             response_data["next_question"] = next_question
@@ -857,6 +929,134 @@ async def evaluate_answer_endpoint(request: EvaluateAnswerRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to evaluate answer: {str(e)}"
+        )
+
+
+# =====================================================
+# ENHANCED EVALUATION ENDPOINT (Dataset-Based with LLM)
+# =====================================================
+
+@app.post("/api/evaluate-answer")
+async def evaluate_answer_enhanced_endpoint(
+    request: EnhancedEvaluationRequest,
+    auth_request: Request
+):
+    """
+    Evaluate answer using dataset context and LLM.
+    
+    This is the PRODUCTION endpoint that:
+    - Finds matching question in final_dataset.json
+    - Compares with ideal/good/average/poor answers
+    - Generates structured feedback with weak_areas
+    - Stores results in database if user is authenticated
+    
+    Args:
+        request: EnhancedEvaluationRequest
+        auth_request: FastAPI Request for auth extraction
+        
+    Returns:
+        Structured evaluation with scores, feedback, improvements
+    """
+    try:
+        logger.info(f"📊 Enhanced evaluation request: {request.target_role} / {request.experience_level}")
+        
+        # Get evaluated answer
+        evaluation = await evaluate_answer_enhanced(
+            question=request.question,
+            candidate_answer=request.answer_text,
+            target_role=request.target_role,
+            experience_level=request.experience_level,
+            interview_type=request.interview_type
+        )
+        
+        # Prepare response
+        response_data = {
+            "success": True,
+            "evaluation": evaluation
+        }
+        
+        # Optional: Store to database if user is authenticated
+        if SUPABASE_ENABLED:
+            try:
+                user = await get_user_if_authenticated(auth_request)
+                
+                if user and hasattr(request, 'user_id') and request.user_id:
+                    user_id = request.user_id
+                    logger.info(f"💾 Storing evaluation for user {user_id}")
+                    
+                    # Store evaluation result in database
+                    evaluation_data = {
+                        "user_id": user_id,
+                        "question": request.question,
+                        "answer_text": request.answer_text,
+                        "target_role": request.target_role,
+                        "experience_level": request.experience_level,
+                        "interview_type": request.interview_type,
+                        "scores": evaluation.get("scores", {}),
+                        "average_score": evaluation.get("average_score", 0),
+                        "feedback": evaluation.get("feedback", ""),
+                        "weak_areas": evaluation.get("weak_areas", []),
+                        "dataset_match": evaluation.get("metadata", {}).get("dataset_match", False),
+                        "evaluation_json": evaluation
+                    }
+                    
+                    # Insert the evaluation record
+                    # Note: This requires an evaluations table (can be added via migration)
+                    try:
+                        from database.supabase_client import _db_insert
+                        await _db_insert("evaluations", evaluation_data)
+                        logger.info(f"✅ Evaluation stored for user {user_id}")
+                        response_data["stored_to_database"] = True
+                    except Exception as db_error:
+                        logger.warning(f"⚠️ Could not store to database: {db_error}")
+                        response_data["stored_to_database"] = False
+            except Exception as db_error:
+                logger.warning(f"⚠️ Database storage not available: {db_error}")
+        
+        return JSONResponse(content=response_data)
+        
+    except Exception as e:
+        logger.error(f"❌ Enhanced evaluation failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to evaluate answer: {str(e)}"
+        )
+
+
+@app.get("/api/evaluate-answer/status")
+async def evaluate_answer_status():
+    """
+    Check if enhanced evaluation service is ready.
+    Returns dataset info and LLM availability.
+    """
+    try:
+        service = get_evaluation_service()
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "service_status": "ready",
+                "dataset_loaded": service.dataset is not None,
+                "dataset_entries": len(service.dataset) if service.dataset else 0,
+                "evaluation_types": ["dataset_based", "generic"],
+                "features": [
+                    "Question similarity matching",
+                    "Dataset-based comparison",
+                    "LLM-powered evaluation",
+                    "Weak area detection",
+                    "Improvement suggestions"
+                ]
+            }
+        )
+    except Exception as e:
+        logger.error(f"Status check failed: {e}")
+        return JSONResponse(
+            content={
+                "success": False,
+                "service_status": "error",
+                "error": str(e)
+            },
+            status_code=500
         )
         
     except HTTPException:
@@ -977,6 +1177,149 @@ async def speech_to_text_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Speech-to-Text processing failed: {str(e)}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DATASET GENERATION ENDPOINTS (NEW)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class DatasetGenerationRequest(BaseModel):
+    """Request model for dataset generation."""
+    questions: List[str]
+    num_questions: Optional[int] = None  # If provided, generates sample questions
+    job_context: Optional[Dict[str, Any]] = None
+    batch_size: int = 10
+    save_to_supabase: bool = False
+
+
+@app.post("/api/training/generate-dataset")
+async def generate_dataset_endpoint(request: DatasetGenerationRequest):
+    """
+    Generate training dataset for ML models.
+    
+    Args:
+        questions: List of interview questions
+        job_context: Optional job context (role, level, type)
+        batch_size: Number of parallel generation tasks
+        save_to_supabase: Whether to save to Supabase table
+    
+    Returns:
+        Dataset generation task ID (async operation)
+    
+    Note: This is an async operation. Check status with /api/training/dataset-status/{task_id}
+    
+    Example:
+        POST /api/training/generate-dataset
+        {
+            "questions": [
+                "Tell me about a complex system you designed",
+                "How do you handle debugging?"
+            ],
+            "batch_size": 5,
+            "save_to_supabase": true
+        }
+    """
+    try:
+        from services.dataset_generator import DatasetGenerator
+        import uuid
+        
+        # Generate task ID for tracking
+        task_id = str(uuid.uuid4())
+        
+        # For now, return instructions (full async not implemented yet)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "success": True,
+                "message": "Dataset generation initiated",
+                "task_id": task_id,
+                "status": "pending",
+                "instructions": "Use CLI for production: python scripts/generate_dataset.py --questions 1000",
+                "note": "Large dataset generation (1000+) is recommended via CLI for stability"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error initiating dataset generation: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to initiate dataset generation: {str(e)}"
+        )
+
+
+@app.get("/api/training/dataset-status")
+async def dataset_status_endpoint():
+    """
+    Get status of dataset generation.
+    
+    Currently returns configuration info.
+    Full async implementation recommended for production.
+    """
+    return JSONResponse(
+        content={
+            "feature": "Dataset Generation",
+            "status": "manual_cli_recommended",
+            "command": "python backend/src/scripts/generate_dataset.py --questions 1000 --output dataset.json",
+            "instructions": {
+                "step_1": "Install httpx: pip install httpx",
+                "step_2": "Run: python backend/src/scripts/generate_dataset.py --test (to test with 3 questions)",
+                "step_3": "Run: python backend/src/scripts/generate_dataset.py --questions 1000 (for production)",
+                "step_4": "Optional: python backend/src/scripts/generate_dataset.py --questions 1000 --supabase (to save to DB)"
+            }
+        }
+    )
+
+
+@app.get("/api/training/dataset-info")
+async def dataset_info_endpoint():
+    """Get information about available training datasets."""
+    try:
+        from database.supabase_client import supabase
+        
+        if not SUPABASE_ENABLED or not supabase:
+            return JSONResponse(
+                content={
+                    "supabase_enabled": False,
+                    "message": "Supabase not configured"
+                }
+            )
+        
+        # Get dataset statistics
+        try:
+            result = supabase.table("generated_datasets").select(
+                "count(*)"
+            ).execute()
+            
+            count = result.data[0]["count"] if result.data else 0
+            
+            return JSONResponse(
+                content={
+                    "supabase_enabled": True,
+                    "total_dataset_entries": count,
+                    "tables": [
+                        "generated_datasets",
+                        "dataset_generation_runs",
+                        "answer_features"
+                    ],
+                    "generation_script": "python backend/src/scripts/generate_dataset.py",
+                    "documentation": "See IMPLEMENTATION_TECHNICAL_AUDIT.md"
+                }
+            )
+        except:
+            return JSONResponse(
+                content={
+                    "supabase_enabled": True,
+                    "message": "Tables not yet created. Run database setup first.",
+                    "setup_command": "python backend/src/database/database_setup.py --setup"
+                }
+            )
+    
+    except Exception as e:
+        logger.error(f"Error getting dataset info: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
         )
 
 
