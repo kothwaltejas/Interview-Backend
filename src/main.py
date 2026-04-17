@@ -740,9 +740,9 @@ async def get_session_summary_endpoint(
                     "answered_questions": answered_count,
                     "skipped_questions": skipped_count,
                     "duration_seconds": summary.get("duration_seconds", 0),
-                    "average_score": overall_eval.get("overall_score"),
-                    "performance_tier": overall_eval.get("performance_tier"),
-                    "overall_feedback": overall_eval.get("summary", ""),
+                    "average_score": summary.get("overall_score"),
+                    "performance_tier": summary.get("performance_tier"),
+                    "overall_feedback": summary.get("overall_feedback", summary.get("summary", "")),
                     "topics_covered": list(set([q.get("category", "General") for q in session.questions if q.get("category")]))
                 }
                 
@@ -911,7 +911,7 @@ async def conversational_answer_endpoint(request: ConversationalAnswerRequest):
             logger.info(f"🎯 Evaluating answer for session {request.session_id}")
             evaluation = await evaluate_answer_enhanced(
                 question=current_question_data.get('question', ''),
-                answer_text=request.answer_text,
+                candidate_answer=request.answer_text,
                 target_role=session.job_context.get('target_role', 'Unknown'),
                 experience_level=session.job_context.get('experience_level', 'Unknown'),
                 interview_type=session.job_context.get('interview_type', 'Technical')
