@@ -38,7 +38,9 @@ try:
         insert_completed_session,
         insert_answers_bulk,
         upsert_user_statistics,
-        upsert_user_profile
+        upsert_user_profile,
+        get_resume_by_id,
+        supabase
     )
     SUPABASE_ENABLED = True
     print("✅ Supabase integration enabled")
@@ -279,6 +281,59 @@ async def parse_resume_endpoint(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
         )
+
+@app.get("/api/resumes/{resume_id}/download")
+async def download_resume_endpoint(
+    resume_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Download resume file for authenticated user (proxy endpoint)
+    This endpoint serves the resume as a file download with proper authentication
+    
+    Usage: Use this if direct Supabase URLs fail with 404 Bucket not found errors
+    """
+    try:
+        from fastapi.responses import StreamingResponse
+        
+        user_id = user["user_id"]
+        logger.info(f"📥 Download request for resume {resume_id} by user {user_id}")
+        
+        # Get resume from database
+        resume = await get_resume_by_id(resume_id)
+        
+        if not resume:
+            logger.error(f"Resume not found: {resume_id}")
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        # Verify user owns this resume
+        if str(resume.get("user_id")) != str(user_id):
+            logger.error(f"Unauthorized access to resume {resume_id} by user {user_id}")
+            raise HTTPException(status_code=403, detail="Unauthorized")
+        
+        # Extract file path from URL
+        file_url = resume["file_url"]
+        file_path = file_url.split("/resumes/", 1)[1] if "/resumes/" in file_url else file_url
+        
+        logger.info(f"📥 Downloading from storage: {file_path}")
+        
+        # Download from Supabase Storage
+        if not supabase:
+            raise HTTPException(status_code=500, detail="Storage service not available")
+        
+        file_data = supabase.storage.from_("resumes").download(file_path)
+        
+        return StreamingResponse(
+            iter([file_data]),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"inline; filename={resume['file_name']}"}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading resume: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to download resume")
 
 @app.post("/api/questions/generate")
 async def generate_questions_endpoint(request: QuestionGenerationRequest):

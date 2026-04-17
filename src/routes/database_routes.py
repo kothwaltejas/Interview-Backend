@@ -12,6 +12,7 @@ from auth.supabase_auth import get_current_user
 from database.supabase_client import (
     insert_resume,
     get_user_resumes,
+    get_resume_by_id,
     insert_completed_session,
     insert_answers_bulk,
     get_user_sessions,
@@ -21,7 +22,9 @@ from database.supabase_client import (
     get_user_statistics,
     upload_resume_to_storage,
     upsert_user_profile,
-    get_user_profile
+    get_user_profile,
+    _db_delete,
+    delete_resume_from_storage
 )
 
 logger = logging.getLogger(__name__)
@@ -172,15 +175,29 @@ async def upload_resume_endpoint(
         file_content = await file.read()
         
         # Upload to Supabase Storage
+        logger.info(f"📤 Uploading resume for user {user_id}: {file.filename}")
         file_url = await upload_resume_to_storage(
             user_id=user_id,
             file_content=file_content,
             file_name=file.filename
         )
+        logger.info(f"✅ Resume uploaded to storage: {file_url}")
         
-        # Parse resume (your existing logic)
-        from ..services.resume_parser import parse_resume_pdf
-        parsed_data = parse_resume_pdf(file_content)
+        # Parse resume (optional - don't fail if parsing fails)
+        parsed_data = {}
+        try:
+            from ..services.resume_parser import parse_resume_with_llm
+            logger.info(f"🔍 Parsing resume with LLM...")
+            parsed_data = parse_resume_with_llm(file_content)
+            logger.info(f"✅ Resume parsed successfully")
+        except Exception as parse_error:
+            logger.warning(f"⚠️ Could not parse resume with LLM: {parse_error} - using empty data")
+            parsed_data = {
+                "name": file.filename.replace(".pdf", ""),
+                "skills": [],
+                "experience": [],
+                "education": []
+            }
         
         # Insert into database
         resume_record = await insert_resume(
@@ -191,15 +208,21 @@ async def upload_resume_endpoint(
             file_size_bytes=len(file_content)
         )
         
+        logger.info(f"✅ Resume record created: {resume_record['id']}")
+        
         return {
             "success": True,
             "resume_id": resume_record["id"],
             "file_url": file_url,
+            "file_name": file.filename,
+            "file_size": len(file_content),
             "parsed_data": parsed_data
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error uploading resume: {e}")
+        logger.error(f"❌ Error uploading resume: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -225,6 +248,69 @@ async def get_resumes_endpoint(
         
     except Exception as e:
         logger.error(f"Error fetching resumes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/resumes/{resume_id}")
+async def delete_resume_endpoint(
+    resume_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Delete a resume by ID
+    Protected route - requires authentication
+    Only the resume owner can delete it
+    """
+    try:
+        user_id = user["user_id"]
+        
+        # Verify ownership
+        # Note: get_resume_by_id, _db_delete, delete_resume_from_storage are imported at top of file
+
+        resume = await get_resume_by_id(resume_id)
+        
+        if not resume:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        if resume.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Access denied - you can only delete your own resumes")
+        
+        # Delete from storage
+        try:
+            file_url = resume.get("file_url", "")
+            if file_url:
+                # Extract file path from URL
+                # URL format: https://pdlzpwynoblqnhireusw.supabase.co/storage/v1/object/public/resumes/{user_id}/{timestamp}_{filename}
+                # We need to extract: {user_id}/{timestamp}_{filename}
+                if "/resumes/" in file_url:
+                    file_path = file_url.split("/resumes/")[-1]  # Get everything after /resumes/
+                    logger.info(f"🗑️ Deleting resume from storage: {file_path}")
+                    deletion_result = await delete_resume_from_storage(file_path)
+                    if deletion_result:
+                        logger.info(f"✅ Resume file deleted from storage: {file_path}")
+                    else:
+                        logger.warning(f"⚠️ Could not delete from storage, but continuing with database deletion")
+        except Exception as storage_error:
+            logger.warning(f"⚠️ Warning during storage cleanup: {storage_error}")
+            # Don't fail the request if storage deletion fails
+        
+        # Delete from database
+        await _db_delete(
+            table="resumes",
+            filters={"id": resume_id}
+        )
+        
+        logger.info(f"✅ Resume {resume_id} deleted for user {user_id}")
+        
+        return {
+            "success": True,
+            "message": "Resume deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting resume: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

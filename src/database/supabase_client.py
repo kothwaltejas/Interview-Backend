@@ -1,7 +1,7 @@
 """
 Supabase Database Client
 Handles all database operations for Interview AI platform
-Uses direct HTTP requests to avoid SDK dependency issues
+Uses Supabase SDK for storage and direct HTTP for REST API
 """
 
 import os
@@ -20,6 +20,22 @@ else:
     load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+# Initialize Supabase SDK client
+try:
+    from supabase import create_client
+    SUPABASE_URL = os.getenv("SUPABASE_URL")
+    SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+    
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        logger.info("✅ Supabase SDK client initialized for storage operations")
+    else:
+        supabase = None
+        logger.error("❌ Missing SUPABASE_URL or SUPABASE_SERVICE_KEY")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Supabase SDK: {e}")
+    supabase = None
 
 
 class SupabaseDB:
@@ -137,6 +153,26 @@ async def _db_upsert(table: str, data: Dict[str, Any], conflict_column: str = "i
         response.raise_for_status()
         result = response.json()
         return result[0] if result else {}
+
+
+async def _db_delete(table: str, filters: Dict[str, Any]) -> bool:
+    """Delete records from a table with filters"""
+    headers = SupabaseDB.get_headers()
+    
+    async with httpx.AsyncClient() as client:
+        url = f"{SupabaseDB.get_rest_url()}/{table}"
+        
+        # Build filter query
+        filter_parts = []
+        for key, value in filters.items():
+            filter_parts.append(f"{key}=eq.{value}")
+        
+        if filter_parts:
+            url += "?" + "&".join(filter_parts)
+        
+        response = await client.delete(url, headers=headers)
+        response.raise_for_status()
+        return True
 
 
 # =====================================================
@@ -456,7 +492,7 @@ async def get_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
 
 
 # =====================================================
-# STORAGE OPERATIONS (Supabase Storage via HTTP)
+# STORAGE OPERATIONS (Supabase Storage via SDK)
 # =====================================================
 
 async def upload_resume_to_storage(
@@ -464,54 +500,64 @@ async def upload_resume_to_storage(
     file_content: bytes,
     file_name: str
 ) -> str:
-    """Upload resume PDF to Supabase Storage using direct HTTP"""
+    """Upload resume PDF to Supabase Storage using SIGNED URLs (secure)"""
     try:
+        if not supabase:
+            raise Exception("Supabase client not initialized - check SUPABASE_URL and SUPABASE_SERVICE_KEY")
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_path = f"{user_id}/{timestamp}_{file_name}"
         
-        storage_url = f"{SupabaseDB.get_storage_url()}/object/resumes/{file_path}"
+        logger.info(f"📤 Uploading resume to bucket 'resumes': {file_path}")
         
-        headers = {
-            "apikey": SupabaseDB._key,
-            "Authorization": f"Bearer {SupabaseDB._key}",
-            "Content-Type": "application/pdf"
-        }
+        # Use Supabase SDK to upload file
+        response = supabase.storage.from_("resumes").upload(
+            path=file_path,
+            file=file_content,
+            file_options={"content-type": "application/pdf"}
+        )
         
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                storage_url,
-                headers=headers,
-                content=file_content
+        # Generate signed URL (valid for 30 days)
+        # Signed URLs don't require bucket to be public and prevent 404 Bucket not found errors
+        try:
+            signed_url_response = supabase.storage.from_("resumes").create_signed_url(
+                file_path,
+                expires_in=2592000  # 30 days in seconds
             )
-            response.raise_for_status()
-        
-        # Return public URL
-        public_url = f"{SupabaseDB._url}/storage/v1/object/public/resumes/{file_path}"
-        logger.info(f"Resume uploaded: {file_path}")
-        return public_url
+            signed_url = signed_url_response.get("signedURL") or signed_url_response
+            logger.info(f"✅ Resume uploaded successfully: {file_path}")
+            logger.info(f"📎 Signed URL (30 days): {signed_url}")
+            return signed_url
+        except Exception as url_error:
+            logger.warning(f"⚠️ Could not generate signed URL: {url_error}")
+            # Fallback to public URL if signed URL generation fails
+            public_url = f"{SUPABASE_URL}/storage/v1/object/public/resumes/{file_path}"
+            logger.info(f"📎 Using public URL: {public_url}")
+            return public_url
             
     except Exception as e:
-        logger.error(f"Error uploading resume: {e}")
+        logger.error(f"❌ Error uploading resume: {e}")
         raise
 
 
 async def delete_resume_from_storage(file_path: str) -> bool:
-    """Delete resume from storage"""
+    """Delete resume from storage using SDK"""
     try:
-        storage_url = f"{SupabaseDB.get_storage_url()}/object/resumes/{file_path}"
+        if not supabase:
+            raise Exception("Supabase client not initialized")
         
-        headers = {
-            "apikey": SupabaseDB._key,
-            "Authorization": f"Bearer {SupabaseDB._key}"
-        }
+        # Extract just the path part if full URL is passed
+        if "/storage/" in file_path:
+            file_path = file_path.split("/resumes/", 1)[1] if "/resumes/" in file_path else file_path
         
-        async with httpx.AsyncClient() as client:
-            response = await client.delete(storage_url, headers=headers)
-            response.raise_for_status()
+        logger.info(f"🗑️ Deleting resume from storage: {file_path}")
         
-        logger.info(f"Resume deleted: {file_path}")
+        # Use Supabase SDK to delete file
+        response = supabase.storage.from_("resumes").remove([file_path])
+        
+        logger.info(f"✅ Resume deleted successfully: {file_path}")
         return True
             
     except Exception as e:
-        logger.error(f"Error deleting resume: {e}")
+        logger.error(f"❌ Error deleting resume: {e}")
         return False
