@@ -11,7 +11,7 @@ from .llm_groq_config import chat_completion
 logger = logging.getLogger(__name__)
 
 
-def generate_interviewer_response(
+async def generate_interviewer_response(
     current_question: str,
     candidate_answer: str,
     resume_context: Dict = None,
@@ -132,19 +132,19 @@ Guidelines:
 Return ONLY the brief acknowledgment as plain text."""
 
     try:
-        response = chat_completion(
+        response = await chat_completion(
             prompt=user_prompt,
             system_prompt=system_prompt,
-            max_tokens=60,  # Very short responses (2-3 lines)
-            temperature=0.5   # More natural variation
+            max_tokens=60,
+            temperature=0.5
         )
-        
+
         if not response:
             logger.error("No response from LLM for interviewer response")
             return generate_fallback_response(candidate_answer, skip_flag)
-        
+
         return response.strip()
-        
+
     except Exception as e:
         logger.error(f"Error generating interviewer response: {e}")
         return generate_fallback_response(candidate_answer, skip_flag)
@@ -190,7 +190,7 @@ def generate_fallback_response(answer: str, skip_flag: bool = False) -> str:
     return fallback_responses[index]
 
 
-def generate_opening_question(
+async def generate_opening_question(
     resume_data: Dict,
     job_context: Dict = None
 ) -> str:
@@ -257,20 +257,19 @@ Create a natural greeting that:
 Keep it conversational and human. 2-4 sentences."""
 
     try:
-        response = chat_completion(
+        response = await chat_completion(
             prompt=user_prompt,
             system_prompt=system_prompt,
             max_tokens=150,
-            temperature=0.6  # Slight variation for naturalness
+            temperature=0.6
         )
-        
+
         if response:
             return response.strip()
-        
-        # Fallback to template
+
         logger.warning("LLM failed for opening question, using template")
         return generate_opening_fallback(username, target_role)
-        
+
     except Exception as e:
         logger.error(f"Error generating opening question: {e}")
         return generate_opening_fallback(username, target_role)

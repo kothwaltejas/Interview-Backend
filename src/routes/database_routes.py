@@ -406,8 +406,8 @@ async def complete_session_endpoint(
         # Update user statistics
         await upsert_user_statistics(user_id)
         
-        # Clean up in-memory session (optional)
-        # InterviewSession._sessions.pop(request.session_id, None)
+        # Clean up in-memory session to prevent memory leak
+        InterviewSession._sessions.pop(request.session_id, None)
         
         logger.info(f"Session {request.session_id} saved to database as {db_session_id}")
         

@@ -363,100 +363,92 @@ def transcribe_audio(
     language: str = "en"
 ) -> Tuple[str, float]:
     """
-    Transcribe audio to text using faster-whisper.
-    
-    This function is the ONLY entry point for STT in the application.
-    It handles all preprocessing and returns clean text.
-    
-    Args:
-        audio_bytes: Raw audio data from the frontend
-        audio_format: Format of the audio (webm, wav, mp3)
-        language: Language code (default: English)
-    
-    Returns:
-        Tuple of (transcribed_text, confidence_score)
-        
-    Design Decisions:
-    - We use a temp file because faster-whisper doesn't support BytesIO
-    - Audio conversion is optional but improves accuracy
-    - We return confidence for potential UI feedback
+    Transcribe audio to text. Returns (transcript, confidence).
+    For detailed segment data, use transcribe_audio_detailed().
     """
-    
+    result = transcribe_audio_detailed(audio_bytes, audio_format, language)
+    return result["transcript"], result["confidence"]
+
+
+def transcribe_audio_detailed(
+    audio_bytes: bytes,
+    audio_format: str = "webm",
+    language: str = "en"
+) -> dict:
+    """
+    Transcribe audio and return detailed results including segment timing.
+
+    Returns:
+        Dict with keys: transcript, confidence, segments, audio_duration_seconds
+        Each segment has: start, end, text, avg_logprob
+    """
     if not audio_bytes:
         logger.warning("Empty audio received")
-        return "", 0.0
-    
+        return {"transcript": "", "confidence": 0.0, "segments": [], "audio_duration_seconds": 0.0}
+
     try:
         model = get_whisper_model()
-        
-        # Convert audio to optimal format for Whisper
         processed_audio = convert_audio_to_wav_16k(audio_bytes, audio_format)
-        
-        # Write to temp file (faster-whisper requires file path)
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
             tmp_file.write(processed_audio)
             tmp_path = tmp_file.name
-        
+
         try:
-            # First try with VAD filter (removes silence for better accuracy)
-            segments, info = model.transcribe(
+            segments_iter, info = model.transcribe(
                 tmp_path,
                 language=language,
-                beam_size=5,  # Balance between speed and accuracy
-                best_of=5,  # Number of candidates to consider
-                temperature=0.0,  # Deterministic output (no randomness)
-                condition_on_previous_text=False,  # Each segment independent
-                vad_filter=True,  # Voice Activity Detection - removes silence
+                beam_size=5,
+                best_of=5,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                vad_filter=True,
                 vad_parameters={
-                    "min_silence_duration_ms": 300,  # Reduced from 500 - more sensitive
-                    "speech_pad_ms": 400,  # Increased padding around speech
-                    "threshold": 0.3  # Lower threshold - more lenient VAD
+                    "min_silence_duration_ms": 300,
+                    "speech_pad_ms": 400,
+                    "threshold": 0.3
                 }
             )
-            
-            # Collect all segments into full transcript
+
             full_text = ""
             total_confidence = 0.0
             segment_count = 0
-            
-            for segment in segments:
+            segment_data = []
+
+            for segment in segments_iter:
                 full_text += segment.text + " "
-                # Average probability across words gives confidence
                 total_confidence += segment.avg_logprob
                 segment_count += 1
-            
-            # If VAD filtered everything, this means NO SPEECH was detected
-            # Return empty string immediately - DO NOT retry without VAD
-            # Retrying without VAD causes hallucinations on silence/background noise
+                segment_data.append({
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text.strip(),
+                    "avg_logprob": segment.avg_logprob,
+                })
+
             if segment_count == 0:
-                logger.info("⚠️ VAD filtered all audio - no speech detected, returning empty")
-                return "", 0.0
-            
-            # Calculate average confidence (logprob -> rough percentage)
-            avg_confidence = 0.0
-            if segment_count > 0:
-                # Convert log probability to rough confidence (0-1 scale)
-                avg_confidence = min(1.0, max(0.0, 1.0 + (total_confidence / segment_count)))
-            
-            transcript = full_text.strip()
-            
-            # Detect and filter Whisper hallucinations
-            # Common patterns: repeated phrases, "I'm sorry", "Thank you", etc.
-            transcript = _filter_hallucinations(transcript)
-            
-            logger.info(f"✅ Transcribed {len(transcript)} characters with confidence {avg_confidence:.2f}")
-            return transcript, avg_confidence
-            return transcript, avg_confidence
-            
+                logger.info("VAD filtered all audio - no speech detected")
+                return {"transcript": "", "confidence": 0.0, "segments": [], "audio_duration_seconds": info.duration}
+
+            avg_confidence = min(1.0, max(0.0, 1.0 + (total_confidence / segment_count)))
+            transcript = _filter_hallucinations(full_text.strip())
+
+            logger.info(f"Transcribed {len(transcript)} chars, {segment_count} segments, confidence {avg_confidence:.2f}")
+            return {
+                "transcript": transcript,
+                "confidence": avg_confidence,
+                "segments": segment_data,
+                "audio_duration_seconds": info.duration,
+            }
+
         finally:
-            # Clean up temp file
             try:
                 os.unlink(tmp_path)
             except:
                 pass
-                
+
     except Exception as e:
-        logger.error(f"❌ Transcription failed: {e}")
+        logger.error(f"Transcription failed: {e}")
         raise
 
 

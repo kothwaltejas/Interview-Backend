@@ -174,7 +174,7 @@ Return only the JSON object:"""
 
 
 # -------- Parse Resume --------
-def parse_resume_with_llm(file_content: bytes, max_retries: int = 3) -> Dict[str, Any]:
+async def parse_resume_with_llm(file_content: bytes, max_retries: int = 3) -> Dict[str, Any]:
     """
     Parse resume from PDF file content using LLM.
     
@@ -197,7 +197,7 @@ def parse_resume_with_llm(file_content: bytes, max_retries: int = 3) -> Dict[str
 
         for attempt in range(max_retries):
             try:
-                response = chat_completion(prompt)
+                response = await chat_completion(prompt, json_mode=True)
                 if not response:
                     logger.error("No response from LLM")
                     if attempt == max_retries - 1:
@@ -230,7 +230,7 @@ def parse_resume_with_llm(file_content: bytes, max_retries: int = 3) -> Dict[str
         return {"error": f"Critical parsing error: {str(e)}"}
 
 
-def parse_resume_from_file_path(file_path: str) -> Dict[str, Any]:
+async def parse_resume_from_file_path(file_path: str) -> Dict[str, Any]:
     """
     Parse resume from a file path.
     
@@ -243,7 +243,7 @@ def parse_resume_from_file_path(file_path: str) -> Dict[str, Any]:
     try:
         with open(file_path, 'rb') as file:
             file_content = file.read()
-        return parse_resume_with_llm(file_content)
+        return await parse_resume_with_llm(file_content)
     except Exception as e:
         logger.error(f"Error reading file {file_path}: {e}")
         return {"error": f"Could not read file: {str(e)}"}

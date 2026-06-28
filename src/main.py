@@ -24,8 +24,9 @@ from services.question_generator import generate_interview_questions
 from services.interview_session import InterviewSession
 from services.answer_evaluator import evaluate_answer, batch_evaluate_session
 from services.conversational_interviewer import generate_interviewer_response, generate_opening_question
-from services.enhanced_evaluation_service import evaluate_answer_enhanced, get_evaluation_service
+from services.enhanced_evaluation_service import evaluate_answer_enhanced, get_evaluation_service, get_eval_stats
 from services.session_summary_builder import build_session_summary
+from services.composite_evaluator import compute_composite_evaluation
 import logging
 
 # Database and Auth imports
@@ -40,6 +41,7 @@ try:
         upsert_user_statistics,
         upsert_user_profile,
         get_resume_by_id,
+        insert_answer_evaluation,
         supabase
     )
     SUPABASE_ENABLED = True
@@ -131,6 +133,9 @@ class ConversationalAnswerRequest(BaseModel):
     session_id: str
     answer_text: str
     time_taken_seconds: Optional[int] = None
+    video_engagement: Optional[float] = None
+    voice_metrics: Optional[Dict[str, Any]] = None
+    camera_metrics: Optional[Dict[str, Any]] = None
 
 class EnhancedEvaluationRequest(BaseModel):
     """Request for enhanced answer evaluation using dataset."""
@@ -195,7 +200,7 @@ async def parse_resume_endpoint(
         
         # Parse resume using AI service
         logger.info(f"Parsing resume: {file.filename}")
-        parsed_data = parse_resume_with_llm(file_content)
+        parsed_data = await parse_resume_with_llm(file_content)
         
         # Validate and clean the parsed data
         validated_data = validate_parsed_resume(parsed_data)
@@ -358,7 +363,7 @@ async def generate_questions_endpoint(request: QuestionGenerationRequest):
             )
         
         logger.info(f"Generating {num_questions} interview questions")
-        questions = generate_interview_questions(resume_data, job_context, num_questions)
+        questions = await generate_interview_questions(resume_data, job_context, num_questions)
         
         if not questions:
             raise HTTPException(
@@ -398,7 +403,7 @@ async def create_session_endpoint(request: SessionCreateRequest):
     """
     try:
         # Generate questions first
-        questions = generate_interview_questions(
+        questions = await generate_interview_questions(
             request.resume_data,
             request.job_context,
             request.num_questions
@@ -456,7 +461,7 @@ async def create_conversational_session_endpoint(request: SessionCreateRequest):
     """
     try:
         # Generate all questions upfront (same as standard mode)
-        questions = generate_interview_questions(
+        questions = await generate_interview_questions(
             request.resume_data,
             request.job_context,
             request.num_questions
@@ -469,7 +474,7 @@ async def create_conversational_session_endpoint(request: SessionCreateRequest):
             )
         
         # Generate natural opening question
-        opening_question = generate_opening_question(
+        opening_question = await generate_opening_question(
             request.resume_data,
             request.job_context
         )
@@ -578,8 +583,8 @@ async def submit_answer_endpoint(request: AnswerSubmitRequest):
                 detail="No active question to answer"
             )
         
-        # Evaluate the answer
-        evaluation = evaluate_answer(
+        # Evaluate the answer (await — evaluate_answer is now async)
+        evaluation = await evaluate_answer(
             question=current_question['question'],
             candidate_answer=request.answer_text,
             job_context=session.job_context,
@@ -596,12 +601,13 @@ async def submit_answer_endpoint(request: AnswerSubmitRequest):
             time_taken_seconds=request.time_taken_seconds
         )
         
-        # Add evaluation to the last response
+        # Store full evaluation in session response (now uses enhanced schema)
         if session.responses:
+            session.responses[-1]['evaluation'] = evaluation
+            # Also surface score/feedback at top level for legacy consumers
             session.responses[-1].update({
-                'score': evaluation.get('score'),
+                'score': evaluation.get('average_score'),
                 'feedback': evaluation.get('feedback'),
-                'follow_up_question': evaluation.get('follow_up_question')
             })
         
         return JSONResponse(
@@ -708,6 +714,9 @@ async def get_session_summary_endpoint(
             "success": True,
             "summary": summary
         }
+
+        # Task 11: Surface breakdown at top level for frontend convenience
+        response_data["breakdown"] = summary.get("breakdown") or summary.get("scores_by_category", {})
         
         # Log authentication status
         logger.info(f"📊 Session summary request - SUPABASE_ENABLED: {SUPABASE_ENABLED}, User authenticated: {user is not None}")
@@ -718,17 +727,9 @@ async def get_session_summary_endpoint(
                 user_id = user["user_id"]
                 logger.info(f"💾 Starting session save for user: {user_id}")
                 
-                # DEBUG: Log session job_context
-                logger.info(f"🔍 DEBUG: session.job_context = {session.job_context}")
-                
                 # Calculate answered and skipped questions
                 answered_count = len([r for r in session.responses if r.get("answer_text") and not r.get("skipped")])
                 skipped_count = len([r for r in session.responses if r.get("skipped")])
-                
-                # DEBUG: Log responses for answer inspection
-                logger.info(f"🔍 DEBUG: session.responses count = {len(session.responses)}")
-                for idx, resp in enumerate(session.responses):
-                    logger.info(f"🔍 DEBUG: Response {idx+1}: answer_text={repr(resp.get('answer_text', 'MISSING'))[:50]}, skipped={resp.get('skipped')}")
                 
                 # Prepare session data with correct field names
                 session_data = {
@@ -745,9 +746,6 @@ async def get_session_summary_endpoint(
                     "overall_feedback": summary.get("overall_feedback", summary.get("summary", "")),
                     "topics_covered": list(set([q.get("category", "General") for q in session.questions if q.get("category")]))
                 }
-                
-                # DEBUG: Log session_data being sent to database
-                logger.info(f"🔍 DEBUG: session_data = {session_data}")
                 
                 # Find resume_id if available (from session metadata)
                 resume_id = session.metadata.get("resume_id") if hasattr(session, 'metadata') else None
@@ -822,8 +820,19 @@ async def get_session_summary_endpoint(
                 logger.warning(f"⚠️ No authenticated user - session not saved to database")
             response_data["saved_to_database"] = False
         
+        import json as _json
+        try:
+            _json.dumps(response_data)
+        except (TypeError, ValueError):
+            logger.warning("Summary response had non-serializable data, sanitizing")
+            import copy
+            try:
+                response_data = _json.loads(_json.dumps(response_data, default=str))
+            except Exception:
+                response_data = {"success": True, "summary": {"overall_score": summary.get("overall_score", 0)}}
+
         return JSONResponse(content=response_data)
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -834,12 +843,23 @@ async def get_session_summary_endpoint(
         )
 
 @app.post("/api/session/conversational-answer")
-async def conversational_answer_endpoint(request: ConversationalAnswerRequest):
+async def conversational_answer_endpoint(
+    request: ConversationalAnswerRequest,
+    raw_request: Request,
+):
     """
     Submit an answer and get a natural, conversational interviewer response.
     No scores or evaluations - just like a real interview.
     """
     try:
+        # Extract authenticated user (optional — DB persistence only fires when logged in)
+        user = None
+        if SUPABASE_ENABLED:
+            try:
+                user = await get_optional_user(raw_request)
+            except Exception:
+                pass  # Non-fatal; session flow continues regardless of auth
+
         session = InterviewSession.get_session(request.session_id)
         
         if not session:
@@ -874,7 +894,7 @@ async def conversational_answer_endpoint(request: ConversationalAnswerRequest):
                 session.topics_used.append(current_topic)
         
         # Generate interviewer response with state
-        interviewer_response = generate_interviewer_response(
+        interviewer_response = await generate_interviewer_response(
             current_question=current_question_data.get('question', ''),
             candidate_answer=request.answer_text,
             resume_context=session.resume_data,
@@ -903,53 +923,129 @@ async def conversational_answer_endpoint(request: ConversationalAnswerRequest):
             answer_text=request.answer_text,
             time_taken_seconds=request.time_taken_seconds
         )
+        if session.responses and request.video_engagement is not None:
+            session.responses[-1]['video_engagement'] = request.video_engagement
         
         # NEW: Evaluate answer using enhanced evaluation service
         # This runs asynchronously to not block the response
+        # --- Multi-sector evaluation ---
         evaluation = None
+        composite = None
         try:
-            logger.info(f"🎯 Evaluating answer for session {request.session_id}")
+            logger.info(f"Evaluating answer for session {request.session_id}")
             evaluation = await evaluate_answer_enhanced(
                 question=current_question_data.get('question', ''),
                 candidate_answer=request.answer_text,
                 target_role=session.job_context.get('target_role', 'Unknown'),
                 experience_level=session.job_context.get('experience_level', 'Unknown'),
-                interview_type=session.job_context.get('interview_type', 'Technical')
+                interview_type=session.job_context.get('interview_type', 'Technical'),
+                question_difficulty=current_question_data.get('difficulty', 'medium'),
             )
-            logger.info(f"✅ Answer evaluated - Score: {evaluation.get('average_score', 'N/A')}")
-            
-            # Store evaluation in session responses
+
+            composite = compute_composite_evaluation(
+                text_evaluation=evaluation,
+                voice_metrics=request.voice_metrics,
+                camera_metrics=request.camera_metrics,
+            )
+            evaluation["composite"] = composite
+            evaluation["composite_score"] = composite["composite_score"]
+
             if session.responses:
                 session.responses[-1]['evaluation'] = evaluation
-                logger.info(f"📊 Evaluation stored in session response")
-        
+                session.responses[-1]['voice_metrics'] = request.voice_metrics
+                session.responses[-1]['camera_metrics'] = request.camera_metrics
+                logger.info(f"Evaluation stored — composite: {composite['composite_score']}")
+
         except Exception as e:
-            logger.error(f"⚠️ Error evaluating answer (non-blocking): {str(e)}")
-            # Continue without evaluation - don't break the interview flow
-            evaluation = None
+            logger.error(
+                f"Evaluation failed for session {request.session_id} "
+                f"Q#{session.current_question_index}: {e}",
+                exc_info=True,
+            )
+            evaluation = {
+                "scores": {
+                    "technical_accuracy": 0,
+                    "clarity": 0,
+                    "communication": 0,
+                    "completeness": 0,
+                },
+                "average_score": 0,
+                "feedback": "Evaluation unavailable due to a system error. Your answer was recorded.",
+                "strengths": [],
+                "weak_areas": [],
+                "gaps": [],
+                "metadata": {
+                    "fallback": True,
+                    "dataset_match": False,
+                    "type": "system_error",
+                    "reason": str(e),
+                },
+            }
+            if session.responses:
+                session.responses[-1]["evaluation"] = evaluation
+
+        # --- Persist evaluation to answer_evaluations table ---
+        # Fire-and-forget: DB failure must NEVER fail the API response.
+        # The evaluation result is always returned to the frontend regardless.
+        if SUPABASE_ENABLED and user and evaluation:
+            try:
+                # question_index = 0-based index of the answer just recorded
+                q_index = max(0, len(session.responses) - 1)
+                await insert_answer_evaluation(
+                    session_id=request.session_id,
+                    user_id=user["user_id"],
+                    question_index=q_index,
+                    question_text=current_question_data.get("question", ""),
+                    answer_text=request.answer_text,
+                    evaluation=evaluation,
+                )
+            except Exception as db_err:
+                logger.error(
+                    f"⚠️ Failed to persist evaluation to DB (non-fatal): {db_err}",
+                    exc_info=True,
+                )
         
         # Check if interview is complete
         next_question = session.get_current_question()
         is_complete = next_question is None
         
+        import copy, json
+
         response_data = {
             "success": True,
             "interviewer_response": interviewer_response,
             "is_complete": is_complete
         }
-        
-        # Include evaluation in response if available (frontend can use this)
+
+        # Deep-copy evaluation/composite to break any shared references
+        # that cause "Circular reference detected" during JSON serialization
         if evaluation:
-            response_data["evaluation"] = evaluation
-            logger.info(f"📤 Evaluation included in response")
-        
+            try:
+                response_data["evaluation"] = copy.deepcopy(evaluation)
+            except Exception:
+                safe_eval = {k: v for k, v in evaluation.items() if k != "composite"}
+                response_data["evaluation"] = safe_eval
+        if composite:
+            try:
+                response_data["composite"] = copy.deepcopy(composite)
+            except Exception:
+                response_data["composite"] = {"composite_score": composite.get("composite_score", 0)}
+
         if not is_complete:
             response_data["next_question"] = next_question
             response_data["progress"] = {
                 "current": session.current_question_index + 1,
                 "total": len(session.questions)
             }
-        
+
+        # Final safety check for serialization
+        try:
+            json.dumps(response_data)
+        except (TypeError, ValueError):
+            logger.warning("Response had non-serializable data, stripping evaluation")
+            response_data.pop("evaluation", None)
+            response_data.pop("composite", None)
+
         return JSONResponse(content=response_data)
         
     except HTTPException:
@@ -965,7 +1061,7 @@ async def conversational_answer_endpoint(request: ConversationalAnswerRequest):
 async def evaluate_answer_endpoint(request: EvaluateAnswerRequest):
     """Evaluate a single answer (standalone endpoint)."""
     try:
-        evaluation = evaluate_answer(
+        evaluation = await evaluate_answer(
             question=request.question,
             candidate_answer=request.answer,
             job_context=request.job_context,
@@ -1021,7 +1117,9 @@ async def evaluate_answer_enhanced_endpoint(
             candidate_answer=request.answer_text,
             target_role=request.target_role,
             experience_level=request.experience_level,
-            interview_type=request.interview_type
+            interview_type=request.interview_type,
+            # Task 6: honour difficulty if provided in the request
+            question_difficulty=getattr(request, 'difficulty', 'medium') or 'medium',
         )
         
         # Prepare response
@@ -1096,11 +1194,15 @@ async def evaluate_answer_status():
                 "evaluation_types": ["dataset_based", "generic"],
                 "features": [
                     "Question similarity matching",
-                    "Dataset-based comparison",
+                    "Dataset-based comparison (strong match > 0.70)",
                     "LLM-powered evaluation",
+                    "Difficulty-adjusted scoring",
+                    "Score confidence indicator",
                     "Weak area detection",
                     "Improvement suggestions"
-                ]
+                ],
+                # Task 5: live evaluation quality counters
+                "eval_stats": get_eval_stats()
             }
         )
     except Exception as e:
@@ -1114,14 +1216,6 @@ async def evaluate_answer_status():
             status_code=500
         )
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating questions: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate questions: {str(e)}"
-        )
 
 
 # =====================================================
@@ -1207,22 +1301,31 @@ async def speech_to_text_endpoint(
         if audio_format not in supported_formats:
             audio_format = "webm"  # Default assumption for browser MediaRecorder
         
-        logger.info(f"🎤 Received audio: {len(audio_bytes)} bytes, format: {audio_format}")
-        
-        # Transcribe using Whisper
-        transcript, confidence = transcribe_audio(
+        logger.info(f"Received audio: {len(audio_bytes)} bytes, format: {audio_format}")
+
+        from services.speech_to_text import transcribe_audio_detailed
+        from services.voice_analyzer import analyze_voice
+
+        stt_result = transcribe_audio_detailed(
             audio_bytes=audio_bytes,
             audio_format=audio_format,
             language=language
         )
-        
-        # Return clean response
+
+        voice_metrics = analyze_voice(
+            transcript=stt_result["transcript"],
+            audio_duration_seconds=stt_result["audio_duration_seconds"],
+            segments=stt_result["segments"],
+            whisper_confidence=stt_result["confidence"],
+        )
+
         return JSONResponse(content={
             "success": True,
-            "transcript": transcript,
-            "confidence": round(confidence, 2),
+            "transcript": stt_result["transcript"],
+            "confidence": round(stt_result["confidence"], 2),
             "language": language,
-            "audio_size_bytes": len(audio_bytes)
+            "audio_size_bytes": len(audio_bytes),
+            "voice_metrics": voice_metrics,
         })
         
     except HTTPException:

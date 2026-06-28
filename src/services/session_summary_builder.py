@@ -13,8 +13,62 @@ from statistics import mean, stdev
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+def _is_valid_eval(evaluation: Dict[str, Any]) -> bool:
+    """
+    Task 2: Single source of truth for fallback exclusion.
+
+    Returns True only for real LLM evaluations.
+    Excludes ALL evaluations where metadata.fallback=True — this covers:
+      - System-error fallbacks (average_score=0)
+      - Length-based fallbacks (average_score=3–7)
+      - too_short fallbacks
+      - llm_failure, parse_error, etc.
+    """
+    return not evaluation.get("metadata", {}).get("fallback", False)
+
+
+def _build_eval_quality(evaluations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Build a quality summary block for the session response.
+
+    Counts valid vs fallback evaluations and aggregates score_confidence
+    distribution so the frontend can display data reliability.
+    """
+    total = len([e for e in evaluations if not e["skipped"]])
+    fallback_count = sum(
+        1 for e in evaluations
+        if not e["skipped"] and not _is_valid_eval(e["evaluation"])
+    )
+    valid_count = total - fallback_count
+
+    confidence_dist: Dict[str, int] = {"high": 0, "medium": 0, "low": 0}
+    for e in evaluations:
+        if e["skipped"]:
+            continue
+        conf = e["evaluation"].get("score_confidence", "medium")
+        if conf in confidence_dist:
+            confidence_dist[conf] += 1
+
+    return {
+        "total_evaluated": total,
+        "valid_evaluations": valid_count,
+        "fallback_evaluations": fallback_count,
+        "data_reliability": (
+            "high" if fallback_count == 0
+            else "medium" if fallback_count / max(total, 1) < 0.3
+            else "low"
+        ),
+        "score_confidence_distribution": confidence_dist,
+    }
+
+
 class SessionSummaryBuilder:
     """Build enhanced final report from per-answer evaluations."""
+
     
     @staticmethod
     def build_enhanced_summary(
@@ -65,45 +119,56 @@ class SessionSummaryBuilder:
         
         # Build final report
         summary = {
-            # Basic metrics
+            # Core metrics
             "overall_score": round(overall_score, 2),
             "performance_tier": SessionSummaryBuilder.determine_performance_tier(overall_score),
-            "consistency_score": round(consistency_score, 2),  # 0-1, how consistent across answers
-            
+            "consistency_score": round(consistency_score, 2),
+
             # Category breakdown
             "scores_by_category": average_scores,
+            "breakdown": average_scores,
             "category_details": scores_by_category,
-            
-            # Per-difficulty analysis (if available)
+
+            # Per-difficulty analysis
             "scores_by_difficulty": SessionSummaryBuilder.aggregate_by_difficulty(
                 responses, evaluations, questions
             ),
-            
+
             # Patterns and insights
             "strength_areas": strength_areas,
             "improvement_areas": weak_areas,
-            "most_frequent_weak_areas": dict(most_frequent_weak_areas),  # Counter → dict
+            "most_frequent_weak_areas": dict(most_frequent_weak_areas),
             "most_frequent_strengths": dict(most_frequent_strengths),
-            
-            # Coaching and next steps
+            "topic_coverage": SessionSummaryBuilder.analyze_topic_coverage(evaluations, questions),
+            "repetition_warnings": SessionSummaryBuilder.detect_repetitions(evaluations),
+
+            # Coaching
             "coaching_summary": coaching_summary,
             "top_3_improvement_focus": improvement_suggestions[:3],
-            
+
             # Question-level breakdown
             "per_question_breakdown": SessionSummaryBuilder.build_question_breakdown(
                 responses, questions, evaluations
             ),
-            
-            # Additional context
+
+            # Context
             "job_context": job_context,
             "total_questions": len(questions),
             "answered_questions": len([r for r in responses if not r.get("skipped")]),
             "skipped_questions": len([r for r in responses if r.get("skipped")]),
+
+            "eval_quality": _build_eval_quality(evaluations),
         }
-        
+
+        sector_agg = SessionSummaryBuilder.aggregate_sector_scores(responses)
+        summary["sector_averages"] = sector_agg
+
+        if sector_agg.get("composite") is not None:
+            summary["overall_composite_score"] = sector_agg["composite"]
+
         logger.info(f"Enhanced summary generated - Overall Score: {overall_score:.1f}, "
-                   f"Strengths: {len(strength_areas)}, Improvements: {len(weak_areas)}")
-        
+                   f"Composite: {sector_agg.get('composite', 'N/A')}")
+
         return summary
     
     @staticmethod
@@ -123,27 +188,36 @@ class SessionSummaryBuilder:
     
     @staticmethod
     def aggregate_scores(evaluations: List[Dict[str, Any]]) -> Dict[str, List[float]]:
-        """Group scores by category across all answers."""
+        """
+        Group scores by dimension.
+
+        Task 2: Completely excludes ANY evaluation where metadata.fallback=True,
+        regardless of whether the score is zero or non-zero (e.g. length-based
+        fallbacks that return score=5 would otherwise inflate results).
+        """
         scores_by_category = {
             "technical_accuracy": [],
             "clarity": [],
             "communication": [],
-            "confidence": []
+            "completeness": [],
         }
-        
+
         for eval_data in evaluations:
             if eval_data["skipped"]:
                 continue
-                
-            scores = eval_data["evaluation"].get("scores", {})
-            
+
+            evaluation = eval_data["evaluation"]
+            if not _is_valid_eval(evaluation):
+                continue
+
+            scores = evaluation.get("scores", {})
             for category, score_list in scores_by_category.items():
                 if category in scores:
                     try:
                         score_list.append(float(scores[category]))
                     except (TypeError, ValueError):
                         pass
-        
+
         return scores_by_category
     
     @staticmethod
@@ -164,56 +238,59 @@ class SessionSummaryBuilder:
     
     @staticmethod
     def calculate_overall_score(evaluations: List[Dict[str, Any]]) -> float:
-        """Calculate overall score across all categories and questions."""
-        all_scores = []
-        
-        for eval_data in evaluations:
-            if eval_data["skipped"]:
-                continue
-                
-            avg = eval_data["evaluation"].get("average_score")
-            if avg is not None:
-                try:
-                    all_scores.append(float(avg))
-                except (TypeError, ValueError):
-                    pass
-        
-        return mean(all_scores) if all_scores else 0.0
+        """
+        Task 2: Calculate overall score using ONLY fully valid (non-fallback) evaluations.
+
+        Any evaluation with metadata.fallback=True is excluded entirely,
+        including length-based fallbacks with non-zero scores.
+        If no valid evaluations exist, returns 0.0 (not a fake mid-range value).
+        """
+        valid_evals = [
+            e for e in evaluations
+            if not e["skipped"] and _is_valid_eval(e["evaluation"])
+        ]
+
+        valid_scores = [
+            float(e["evaluation"]["average_score"])
+            for e in valid_evals
+            if e["evaluation"].get("average_score", 0) > 0
+        ]
+
+        if not valid_scores:
+            logger.warning(
+                "calculate_overall_score: no valid (non-fallback) scores found. "
+                "Returning 0.0."
+            )
+            return 0.0
+
+        return mean(valid_scores)
     
     @staticmethod
     def calculate_consistency_score(evaluations: List[Dict[str, Any]]) -> float:
         """
-        Calculate consistency: 1.0 = perfect consistency, 0.0 = highly variable.
-        
-        Uses coefficient of variation (stdev/mean) inverted.
+        Calculate consistency: 1.0 = perfect, 0.0 = highly variable.
+
+        Task 2: Only uses valid (non-fallback) scores for consistency calculation.
         """
-        all_scores = []
-        
-        for eval_data in evaluations:
-            if eval_data["skipped"]:
-                continue
-            
-            avg = eval_data["evaluation"].get("average_score")
-            if avg is not None:
-                try:
-                    all_scores.append(float(avg))
-                except (TypeError, ValueError):
-                    pass
-        
+        all_scores = [
+            float(e["evaluation"]["average_score"])
+            for e in evaluations
+            if not e["skipped"]
+            and _is_valid_eval(e["evaluation"])
+            and e["evaluation"].get("average_score") is not None
+        ]
+
         if len(all_scores) < 2:
-            return 1.0  # Only one answer - perfect consistency
-        
+            return 1.0  # Single valid answer = perfect consistency
+
         try:
             score_stdev = stdev(all_scores)
             score_mean = mean(all_scores)
-            
+
             if score_mean == 0:
                 return 0.0
-            
-            # Coefficient of variation: lower = more consistent
+
             cv = score_stdev / score_mean
-            
-            # Invert to get consistency score (1 = consistent, 0 = variable)
             consistency = max(0.0, 1.0 - cv)
             return round(consistency, 2)
         except Exception as e:
@@ -316,6 +393,57 @@ class SessionSummaryBuilder:
                 difficulty_scores[difficulty]["average"] = round(mean(scores), 2)
         
         return difficulty_scores
+
+    @staticmethod
+    def analyze_topic_coverage(evaluations: List[Dict[str, Any]], questions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyze how well the candidate covered different topics/categories."""
+        coverage = {}
+        for i, question in enumerate(questions):
+            category = question.get("category", "general")
+            if category not in coverage:
+                coverage[category] = {"questions": 0, "answered": 0, "avg_score": 0.0, "scores": []}
+            
+            coverage[category]["questions"] += 1
+            
+            eval_data = next((e for e in evaluations if e["question_number"] == i + 1), None)
+            if eval_data and not eval_data["skipped"] and _is_valid_eval(eval_data["evaluation"]):
+                coverage[category]["answered"] += 1
+                score = eval_data["evaluation"].get("average_score", 0)
+                coverage[category]["scores"].append(score)
+        
+        for cat, data in coverage.items():
+            if data["scores"]:
+                data["avg_score"] = round(mean(data["scores"]), 2)
+            del data["scores"]
+            
+        return coverage
+
+    @staticmethod
+    def detect_repetitions(evaluations: List[Dict[str, Any]]) -> List[str]:
+        """Detect if the candidate is repeating the same stories/examples across answers."""
+        import re
+        warnings = []
+        all_answers = []
+        
+        for eval_data in evaluations:
+            if not eval_data["skipped"]:
+                answer = eval_data.get("answer_text", "").lower()
+                # Use words >= 5 chars to find repeated concepts/stories, ignore common small words
+                words = set(re.findall(r'\b\w{5,}\b', answer))
+                all_answers.append({"q_num": eval_data["question_number"], "words": words})
+                
+        # Compare each pair
+        for i in range(len(all_answers)):
+            for j in range(i + 1, len(all_answers)):
+                w1 = all_answers[i]["words"]
+                w2 = all_answers[j]["words"]
+                if w1 and w2:
+                    overlap = len(w1.intersection(w2))
+                    min_len = min(len(w1), len(w2))
+                    if min_len > 10 and (overlap / min_len) > 0.4:
+                        warnings.append(f"High similarity between answers for Q{all_answers[i]['q_num']} and Q{all_answers[j]['q_num']}. Try to use diverse examples.")
+                        
+        return list(set(warnings))[:3] # Return top 3 unique warnings
     
     @staticmethod
     def generate_improvement_suggestions(
@@ -341,12 +469,12 @@ class SessionSummaryBuilder:
                 "and listen for areas where you rush or unclear transitions."
             )
         
-        if "confidence" in weak_areas:
+        if "completeness" in weak_areas:
             suggestions.append(
-                "Build confidence: Practice more answers to this role. The more you practice, "
-                "the more confident you'll sound naturally."
+                "Improve completeness: Make sure you address ALL parts of the question before answering. "
+                "Briefly outline the sub-topics the question covers, then tackle each one."
             )
-        
+
         if "technical_accuracy" in weak_areas:
             role = job_context.get("target_role", "this position")
             suggestions.append(
@@ -452,6 +580,7 @@ class SessionSummaryBuilder:
             
             if eval_data:
                 evaluation = eval_data["evaluation"]
+                composite_data = evaluation.get("composite", {})
                 item.update({
                     "score": evaluation.get("average_score"),
                     "scores_by_category": evaluation.get("scores"),
@@ -459,7 +588,9 @@ class SessionSummaryBuilder:
                     "strengths": evaluation.get("strengths", []),
                     "weaknesses": evaluation.get("weaknesses", []),
                     "weak_areas": evaluation.get("weak_areas", []),
-                    "improved_answer": evaluation.get("improved_answer")
+                    "improved_answer": evaluation.get("improved_answer"),
+                    "composite_score": composite_data.get("composite_score"),
+                    "sector_scores": composite_data.get("sector_scores"),
                 })
             
             breakdown.append(item)
@@ -467,27 +598,83 @@ class SessionSummaryBuilder:
         return breakdown
     
     @staticmethod
+    def aggregate_sector_scores(responses: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Aggregate text, voice, and camera scores across all responses."""
+        text_scores = []
+        voice_scores = []
+        camera_scores = []
+        composite_scores = []
+
+        for r in responses:
+            if r.get("skipped"):
+                continue
+
+            evaluation = r.get("evaluation")
+            if not evaluation:
+                continue
+
+            if not _is_valid_eval(evaluation):
+                continue
+
+            avg = evaluation.get("average_score")
+            if avg and float(avg) > 0:
+                text_scores.append(float(avg))
+
+            composite_data = evaluation.get("composite", {})
+            sector = composite_data.get("sector_scores", {})
+
+            vs = sector.get("voice", {})
+            if vs.get("available") and vs.get("score") is not None:
+                voice_scores.append(float(vs["score"]))
+
+            cs = sector.get("camera", {})
+            if cs.get("available") and cs.get("score") is not None:
+                camera_scores.append(float(cs["score"]))
+
+            comp = composite_data.get("composite_score")
+            if comp is not None:
+                composite_scores.append(float(comp))
+
+        return {
+            "text": round(mean(text_scores), 1) if text_scores else None,
+            "voice": round(mean(voice_scores), 1) if voice_scores else None,
+            "camera": round(mean(camera_scores), 1) if camera_scores else None,
+            "composite": round(mean(composite_scores), 1) if composite_scores else None,
+            "text_count": len(text_scores),
+            "voice_count": len(voice_scores),
+            "camera_count": len(camera_scores),
+        }
+
+    @staticmethod
     def build_basic_summary(
         responses: List[Dict[str, Any]],
         questions: List[Dict[str, Any]],
         job_context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Fallback: Build basic summary without evaluations."""
-        logger.warning("Building basic summary - no evaluations available")
-        
+        """
+        Fallback: Build a minimal summary when no per-answer evaluations exist.
+
+        Returns overall_score=0.0 (not a fake 5.0) so the frontend can
+        distinguish 'no data' from a real mid-range score.
+        """
+        logger.warning("build_basic_summary: no per-answer evaluations available")
+
+        empty_breakdown = {
+            "technical_accuracy": 0.0,
+            "clarity": 0.0,
+            "communication": 0.0,
+            "completeness": 0.0,
+        }
+
         return {
-            "overall_score": 5.0,
-            "performance_tier": "Neutral",
-            "consistency_score": 0.5,
-            "scores_by_category": {
-                "technical_accuracy": 0.0,
-                "clarity": 0.0,
-                "communication": 0.0,
-                "confidence": 0.0
-            },
+            "overall_score": 0.0,
+            "performance_tier": "No Data",
+            "consistency_score": 0.0,
+            "scores_by_category": empty_breakdown,
+            "breakdown": empty_breakdown,
             "strength_areas": [],
             "improvement_areas": [],
-            "coaching_summary": "Interview completed. No evaluation data available.",
+            "coaching_summary": "Interview completed. No per-answer evaluation data was available.",
             "per_question_breakdown": [],
             "job_context": job_context,
             "total_questions": len(questions),

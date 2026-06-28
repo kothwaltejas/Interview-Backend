@@ -317,8 +317,8 @@ IMPORTANT: ALL technical questions MUST come BEFORE any HR questions.
 ╚══════════════════════════════════════════════════════════════════════════════╝"""
 
 
-def generate_interview_questions(
-    resume_data: Dict[str, Any], 
+async def generate_interview_questions(
+    resume_data: Dict[str, Any],
     job_context: Dict[str, Any] = None,
     num_questions: int = 12
 ) -> List[Dict[str, Any]]:
@@ -489,10 +489,11 @@ Generate exactly {num_questions} questions as a clean JSON array:"""
         # ═══════════════════════════════════════════════════════════════
         # CALL GROQ LLM
         # ═══════════════════════════════════════════════════════════════
-        response = chat_completion(
+        response = await chat_completion(
             prompt=prompt,
             max_tokens=3000,
-            temperature=0.6  # Balance between creativity and consistency
+            temperature=0.6,
+            json_mode=True,
         )
         
         if not response:

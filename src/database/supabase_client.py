@@ -175,6 +175,31 @@ async def _db_delete(table: str, filters: Dict[str, Any]) -> bool:
         return True
 
 
+def _extract_resume_storage_path(file_url: str) -> Optional[str]:
+    if not file_url or "/resumes/" not in file_url:
+        return None
+
+    file_path = file_url.split("/resumes/", 1)[1]
+    return file_path.split("?", 1)[0]
+
+
+async def _refresh_resume_file_url(file_url: str) -> str:
+    file_path = _extract_resume_storage_path(file_url)
+    if not file_path or not supabase:
+        return file_url
+
+    try:
+        signed_url_response = supabase.storage.from_("resumes").create_signed_url(
+            file_path,
+            expires_in=2592000
+        )
+        signed_url = signed_url_response.get("signedURL") if isinstance(signed_url_response, dict) else signed_url_response
+        return signed_url or file_url
+    except Exception as e:
+        logger.warning(f"⚠️ Could not refresh signed URL for {file_path}: {e}")
+        return file_url
+
+
 # =====================================================
 # RESUME OPERATIONS
 # =====================================================
@@ -230,7 +255,13 @@ async def get_user_resumes(user_id: str, limit: int = 10) -> List[Dict[str, Any]
             desc=True,
             limit=limit
         )
-        return result if result else []
+        resumes = result if result else []
+        refreshed_resumes = []
+        for resume in resumes:
+            refreshed_resume = dict(resume)
+            refreshed_resume["file_url"] = await _refresh_resume_file_url(resume.get("file_url", ""))
+            refreshed_resumes.append(refreshed_resume)
+        return refreshed_resumes
         
     except Exception as e:
         logger.error(f"Error fetching resumes: {e}")
@@ -240,11 +271,15 @@ async def get_user_resumes(user_id: str, limit: int = 10) -> List[Dict[str, Any]
 async def get_resume_by_id(resume_id: str) -> Optional[Dict[str, Any]]:
     """Get specific resume by ID"""
     try:
-        return await _db_select(
+        resume = await _db_select(
             table="resumes",
             filters={"id": resume_id},
             single=True
         )
+        if resume:
+            resume = dict(resume)
+            resume["file_url"] = await _refresh_resume_file_url(resume.get("file_url", ""))
+        return resume
     except Exception as e:
         logger.error(f"Error fetching resume: {e}")
         return None
@@ -277,9 +312,6 @@ async def insert_completed_session(
             "overall_feedback": session_data.get("overall_feedback"),
             "topics_covered": session_data.get("topics_covered", [])
         }
-        
-        # DEBUG: Log the data being inserted
-        logger.info(f"🔍 DEBUG: Session insert data - target_role='{data['target_role']}', experience_level='{data['experience_level']}'")
         
         result = await _db_insert("interview_sessions", data)
         logger.info(f"Session inserted for user {user_id}")
@@ -350,8 +382,6 @@ async def insert_answers_bulk(
                 "score": answer.get("score"),
                 "evaluation_summary": answer.get("evaluation_summary")
             }
-            # DEBUG: Log each answer record
-            logger.info(f"🔍 DEBUG: Answer record {record['question_number']}: answer_text='{record['answer_text'][:50] if record['answer_text'] else 'EMPTY'}...', is_skipped={record['is_skipped']}")
             answer_records.append(record)
         
         # Bulk insert using REST API
@@ -369,6 +399,69 @@ async def insert_answers_bulk(
     except Exception as e:
         logger.error(f"Error inserting answers: {e}")
         raise
+
+
+async def insert_answer_evaluation(
+    session_id: str,
+    user_id: str,
+    question_index: int,
+    question_text: str,
+    answer_text: str,
+    evaluation: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Persist a per-answer evaluation result to the answer_evaluations table.
+
+    Extracts scalar fields (score, llm_score, rule_score, llm_used, etc.) from
+    the evaluation dict and stores the full dict as evaluation_metadata (JSONB).
+
+    Args:
+        session_id:      In-memory session ID (TEXT, not a FK constraint)
+        user_id:         UUID of the authenticated user
+        question_index:  0-based index of the question within the session
+        question_text:   The interview question that was asked
+        answer_text:     The candidate's verbatim answer
+        evaluation:      Full dict returned by EnhancedEvaluationService
+
+    Returns:
+        The inserted row dict, or {} on failure (caller must handle silently)
+    """
+    import json as _json
+
+    metadata = evaluation.get("metadata", {})
+
+    composite = evaluation.get("composite", {})
+
+    data = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "question_index": question_index,
+        "question_text": question_text,
+        "answer_text": answer_text,
+        "score": float(evaluation.get("average_score", 0)),
+        "llm_score": float(evaluation.get("average_score", 0)) if not metadata.get("fallback") else None,
+        "rule_score": None,
+        "llm_used": not bool(metadata.get("fallback")) and not evaluation.get("llm_used") is False,
+        "dataset_match_type": (
+            "strong" if metadata.get("strong_match")
+            else "weak" if metadata.get("dataset_match")
+            else "none"
+        ),
+        "difficulty": evaluation.get("difficulty"),
+        "evaluation_metadata": evaluation.get("evaluation_metadata", evaluation),
+        "voice_score": composite.get("sector_scores", {}).get("voice", {}).get("score"),
+        "camera_score": composite.get("sector_scores", {}).get("camera", {}).get("score"),
+        "composite_score": composite.get("composite_score"),
+        "voice_metrics": composite.get("sector_scores", {}).get("voice", {}).get("metrics"),
+        "camera_metrics": composite.get("sector_scores", {}).get("camera", {}).get("metrics"),
+    }
+
+    result = await _db_insert("answer_evaluations", data)
+    logger.info(
+        f"📝 Evaluation persisted — session={session_id} "
+        f"q_idx={question_index} score={data['score']}"
+    )
+    return result
 
 
 async def get_session_answers(session_id: str) -> List[Dict[str, Any]]:

@@ -5,11 +5,13 @@ Extracts and validates user_id from Supabase JWT tokens
 
 import os
 import logging
+import time
 from typing import Optional
 from pathlib import Path
 from fastapi import Request, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import jwt, JWTError
+import httpx
+from jose import jwt, JWTError, jwk
 from dotenv import load_dotenv
 
 # Load .env from correct path
@@ -31,6 +33,88 @@ class SupabaseAuth:
         self.jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
         if not self.jwt_secret:
             raise ValueError("SUPABASE_JWT_SECRET must be set in .env")
+        self.supabase_url = os.getenv("SUPABASE_URL")
+        self._jwks_cache = None
+        self._jwks_cached_at = 0.0
+
+    def _get_unverified_header(self, token: str) -> dict:
+        try:
+            return jwt.get_unverified_header(token)
+        except JWTError as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Invalid token header: {str(e)}"
+            )
+
+    def _get_jwks(self) -> dict:
+        if not self.supabase_url:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="SUPABASE_URL must be set to verify asymmetric JWTs"
+            )
+
+        cache_ttl_seconds = 600
+        now = time.monotonic()
+        if self._jwks_cache and (now - self._jwks_cached_at) < cache_ttl_seconds:
+            return self._jwks_cache
+
+        jwks_url = f"{self.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+        try:
+            response = httpx.get(jwks_url, timeout=10.0)
+            response.raise_for_status()
+            jwks = response.json()
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Unable to fetch Supabase JWKS: {str(e)}"
+            )
+
+        if not jwks.get("keys"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Supabase JWKS endpoint returned no keys"
+            )
+
+        self._jwks_cache = jwks
+        self._jwks_cached_at = now
+        return jwks
+
+    def _resolve_verification_key(self, token: str) -> tuple[str | dict, list[str]]:
+        header = self._get_unverified_header(token)
+        alg = header.get("alg")
+        kid = header.get("kid")
+
+        if not alg:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token header missing algorithm"
+            )
+
+        if alg.startswith("HS"):
+            return self.jwt_secret, [alg]
+
+        jwks = self._get_jwks()
+        keys = jwks.get("keys", [])
+        jwk_data = None
+
+        if kid:
+            jwk_data = next((key for key in keys if key.get("kid") == kid), None)
+        if jwk_data is None:
+            jwk_data = next((key for key in keys if key.get("alg") == alg), None) or (keys[0] if keys else None)
+
+        if jwk_data is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No matching Supabase verification key found"
+            )
+
+        try:
+            public_key = jwk.construct(jwk_data)
+            verification_key = public_key.to_pem().decode("utf-8")
+        except Exception:
+            verification_key = jwk_data
+
+        return verification_key, [alg]
     
     def verify_token(self, token: str) -> Optional[dict]:
         """
@@ -47,17 +131,23 @@ class SupabaseAuth:
         """
         try:
             logger.info(f"🔐 Verifying JWT token...")
-            
-            # Supabase uses ES256 for user tokens, decode without signature verification
-            # This is safe because tokens come from trusted Supabase client via HTTPS
+
+            verification_key, algorithms = self._resolve_verification_key(token)
+
+            # Supabase can use either shared-secret or asymmetric JWT signing.
+            # We verify using the token header's declared algorithm and the
+            # matching key material from the project config or JWKS endpoint.
             payload = jwt.decode(
                 token,
-                key="",  # Empty key since we skip verification
+                key=verification_key,
+                algorithms=algorithms,
                 options={
-                    "verify_signature": False,  # Skip signature verification
-                    "verify_aud": False,        # Supabase doesn't use aud claim
-                    "verify_exp": True          # Still check expiration
-                }
+                    "verify_signature": True,
+                    "verify_aud": True,
+                    "verify_exp": True,
+                },
+                audience="authenticated",
+                issuer=f"{self.supabase_url.rstrip('/')}/auth/v1" if self.supabase_url else None,
             )
             
             logger.info(f"✅ JWT decoded successfully. Payload keys: {list(payload.keys())}")
